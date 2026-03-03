@@ -5,9 +5,7 @@
 google-cloud-storage
 google-cloud-secret-manager
 google-cloud-vision
-google-cloud-bigquery
-google-cloud-bigquery-storage
-db-dtypes
+asyncpg
 vertexai==1.43.0
 google-auth
 google-oauth
