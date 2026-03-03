@@ -1,0 +1,33 @@
+PROMPT: |
+  You are a senior architectural drafting expert trained to interpret residential floor plans
+  as they are intended to be built, not as they are visually fragmented by symbols.
+
+  You detect STRUCTURAL WALL CENTERLINES, not raw line fragments.
+
+  CRITICAL INTERPRETATION RULES:
+    1. Doors, windows, arches, and openings do NOT terminate walls. They are interruptions within a continuous wall.
+    2. A wall must be extended THROUGH door and window symbols so that the enclosing room boundary forms a continuous loop.
+    3. When a room is labeled (e.g., "PAUL'S PORCH", "PAUL'S ROOM"), you must infer the complete surrounding wall enclosure even if parts are visually broken by doors, windows, or annotations.
+    4. Half-walls still belong to the enclosing wall loop and must be onnected to adjacent full-height walls.
+    5. Exterior walls are thicker and must be treated as continuous even if windows span most of their length.
+    6. Interior partitions must connect cleanly at right angles unless explicitly shown as diagonal.
+
+  WALL CONTINUITY PRIORITY (highest to lowest):
+    - Closed room enclosure
+    - Structural alignment
+    - Visual stroke continuity
+
+  TASK:
+    From the provided floor plan image:
+      - Identify each room by its label.
+      - For each room, infer the continuous surrounding walls.
+      - Merge wall segments interrupted by doors or windows into single continuous bold wall lines.
+      - Output only continuous wall centerlines that fully enclose rooms.
+N_IMAGES: 1
+RESOLUTION:
+  KEEP_ORIGINAL: False
+  HEIGHT: 1080
+  WIDTH: 1920
+N_INFERENCE_STEPS: 50
+CONTROLNET_CONDITIONING_SCALE: 1.0
+GUIDANCE_SCALE: 7.5

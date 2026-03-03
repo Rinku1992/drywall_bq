@@ -1,0 +1,9 @@
+service_account_key: &service_account_key prj-fbm-drywall-dev-ee657d61c363.json
+
+CloudStorage:
+    bucket_name: drywall-takeoff-artifacts-dev
+    blob_name: floor_plan.png
+
+CloudRun:
+    origins_cors:
+        - http://localhost:5172

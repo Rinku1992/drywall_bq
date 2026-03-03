@@ -1,0 +1,25 @@
+pixel_aspect_ratio_to_feet: &pixel_aspect_ratio_to_feet ## Applicable for a Full HD (1920 x 1080) resolution
+  horizontal: 0.07281931464174456
+  vertical: 0.04096086448598132
+  area: 0.006384249662009915
+
+modelling:
+  tolerance_vertical: 5
+  tolerance_horizontal: 5
+  tolerance_vertical_join: 2
+  tolerance_horizontal_join: 2
+  tolerance_euclidean_join: 2.82
+  width_in_feet: 1
+  height_in_feet: 9.125
+  scale: 0.25``:1`0``
+  pixel_aspect_ratio: *pixel_aspect_ratio_to_feet
+  HoughLinesTransformation:
+    rho: 1
+    theta: 0.017453292519943295
+    threshold: 40
+    minLineLength: 8
+    maxLineGap: 10
+  kernel:
+    height: 1000
+    width: 1000
+    stride: 750

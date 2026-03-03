@@ -1,0 +1,26 @@
+# DO NOT include azure-functions-worker in this file
+# The Python Worker is managed by Azure Functions platform
+# Manually managing azure-functions-worker may cause unexpected issues
+
+google-cloud-storage
+google-cloud-secret-manager
+google-cloud-vision
+google-cloud-bigquery
+google-cloud-bigquery-storage
+db-dtypes
+vertexai==1.43.0
+google-auth
+google-oauth
+pathlib
+pdf2image
+pydantic
+python-multipart
+scikit-image
+opencv-python
+numpy
+ruamel-yaml
+matplotlib
+pygltflib
+pillow
+fastapi
+uvicorn
