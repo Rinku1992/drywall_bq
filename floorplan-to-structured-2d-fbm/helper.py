@@ -103,9 +103,10 @@ async def create_pg_pool(credentials) -> asyncpg.Pool:
             database=pg_config["database"],
             user=pg_config["user"],
             password=pg_config["password"],
-            min_size=pg_config.get("min_pool_size", 2),
-            max_size=pg_config.get("max_pool_size", 10),
+            min_size=1,
+            max_size=5,
             command_timeout=300,
+            max_inactive_connection_lifetime=0,
         )
         log_json("INFO", "PG_POOL_CREATED", host=pg_config["host"],
                  database=pg_config["database"])
