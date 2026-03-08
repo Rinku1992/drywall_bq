@@ -190,26 +190,12 @@ async def insert_model_2d(
     target_drywalls, pool, credentials
 ):
     page_number = int(page_number)
-
-    if not model_2d.get("metadata", None):
-        row = await pg_fetch_one(
-            pool,
-            "SELECT model_2d->'metadata' AS metadata FROM models "
-            "WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3",
-            [project_id, plan_id, page_number],
-            query_name="insert_model_2d__fetch_metadata"
-        )
-        if row:
-            metadata = parse_jsonb(row["metadata"])
-            if metadata:
-                model_2d["metadata"] = metadata
-
-    model_2d_json = json.dumps(model_2d)
     scale = scale or ''
     target_drywalls = target_drywalls or ''
 
-    # Use a fresh direct connection instead of pool to avoid
-    # stale/dead connections after long Vertex AI processing
+    # Use a fresh direct connection for ALL DB operations here.
+    # After 5-15 min of Vertex AI processing, pool connections are
+    # dead (killed by VPC connector). A fresh connection guarantees success.
     pg_config = credentials["PostgreSQL"]
     conn = await asyncpg.connect(
         host=pg_config["host"],
@@ -220,6 +206,19 @@ async def insert_model_2d(
         timeout=30,
     )
     try:
+        if not model_2d.get("metadata", None):
+            row = await conn.fetchrow(
+                "SELECT model_2d->'metadata' AS metadata FROM models "
+                "WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3",
+                project_id, plan_id, page_number,
+            )
+            if row:
+                metadata = parse_jsonb(row["metadata"])
+                if metadata:
+                    model_2d["metadata"] = metadata
+
+        model_2d_json = json.dumps(model_2d)
+
         status = await conn.execute(
             """
             INSERT INTO models (
@@ -244,7 +243,7 @@ async def insert_model_2d(
         log_json("INFO", "DB_EXECUTE", query="insert_model_2d", status=status)
     finally:
         await conn.close()
-
+        
 async def load_templates(pool, credentials):
     """Load SKU/drywall templates from the sku table."""
     rows = await pg_fetch_all(pool, "SELECT * FROM sku", query_name="load_templates")
