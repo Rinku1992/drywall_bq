@@ -280,55 +280,62 @@ class DrywallAssembly(BaseModel):
         return v
 
 class Ceiling(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    room_name: Optional[str]
-    area: float
-    confidence: float = Field(ge=0, le=1)
-    ceiling_type: str
-    height: float
-    slope: float
-    slope_enabled: bool
-    tilt_axis: Optional[Literal["horizontal", "vertical", "NULL"]]
-    drywall_assembly: DrywallAssembly
-    code_references: List[str]
-    recommendation: Optional[str]
-
-    @field_validator("area", "height", "slope")
+    model_config = ConfigDict(extra="allow")
+    room_name: Optional[str] = None
+    area: Optional[Union[float, str]] = 0.0
+    confidence: Optional[float] = Field(default=0.5, ge=0, le=1)
+    ceiling_type: Optional[str] = ""
+    height: Optional[Union[float, str]] = 0.0
+    slope: Optional[Union[float, str]] = 0.0
+    slope_enabled: Optional[bool] = False
+    tilt_axis: Optional[Literal["horizontal", "vertical", "NULL"]] = None
+    drywall_assembly: Optional[DrywallAssembly] = None
+    code_references: List[str] = Field(default_factory=list)
+    recommendation: Optional[str] = None
+    @field_validator("area", "height", "slope", mode="before")
     @classmethod
-    def validate_float(cls, v):
-        return ensure_not_nan(v)
+    def coerce_float(cls, v):
+        if v is None:
+            return 0.0
+        try:
+            return ensure_not_nan(float(v))
+        except (ValueError, TypeError):
+            return 0.0
 
 class WallParameter(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    room_name: Optional[str]
-    length: float
-    confidence: float = Field(ge=0, le=1)
-    width: Optional[float]
-    height: float
-    wall_type: str
-    drywall_assembly: DrywallAssembly
-    code_references: List[str]
-    recommendation: Optional[str]
-
-    @field_validator("length", "height")
+    model_config = ConfigDict(extra="allow")
+    room_name: Optional[str] = None
+    length: Optional[Union[float, str]] = 0.0
+    confidence: Optional[float] = Field(default=0.5, ge=0, le=1)
+    width: Optional[float] = None
+    height: Optional[Union[float, str]] = 0.0
+    wall_type: Optional[str] = ""
+    drywall_assembly: Optional[DrywallAssembly] = None
+    code_references: List[str] = Field(default_factory=list)
+    recommendation: Optional[str] = None
+    @field_validator("length", "height", mode="before")
     @classmethod
-    def validate_float(cls, v):
-        return ensure_not_nan(v)
-
-    @field_validator("width")
+    def coerce_float(cls, v):
+        if v is None:
+            return 0.0
+        try:
+            return ensure_not_nan(float(v))
+        except (ValueError, TypeError):
+            return 0.0
+    @field_validator("width", mode="before")
     @classmethod
-    def validate_optional_float(cls, v):
+    def coerce_optional_float(cls, v):
         if v is None:
             return v
-        return ensure_not_nan(v)
+        try:
+            return ensure_not_nan(float(v))
+        except (ValueError, TypeError):
+            return None
 
 class DrywallPredictorCaliforniaResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    ceiling: Ceiling
-    wall_parameters: List[WallParameter]
+    model_config = ConfigDict(extra="allow")
+    ceiling: Optional[Ceiling] = None
+    wall_parameters: List[WallParameter] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def check_wall_count(self):
