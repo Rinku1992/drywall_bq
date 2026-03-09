@@ -337,12 +337,6 @@ class DrywallPredictorCaliforniaResponse(BaseModel):
     ceiling: Optional[Ceiling] = None
     wall_parameters: List[WallParameter] = Field(default_factory=list)
 
-    @model_validator(mode="after")
-    def check_wall_count(self):
-        if len(self.wall_parameters) < 1:
-            raise ValueError("At least one wall required")
-        return self
-
 SCALE_AND_CEILING_HEIGHT_DETECTOR = """
   You are an expert architectural drawing text parser
 
