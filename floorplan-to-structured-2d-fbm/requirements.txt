@@ -5,7 +5,9 @@
 google-cloud-storage
 google-cloud-secret-manager
 google-cloud-vision
-asyncpg
+google-cloud-bigquery
+google-cloud-bigquery-storage
+db-dtypes
 vertexai==1.43.0
 google-auth
 google-oauth
@@ -15,7 +17,10 @@ pydantic
 python-multipart
 scikit-image
 opencv-python
+geoip2
 numpy
+roman
+shapely
 ruamel-yaml
 matplotlib
 pygltflib

@@ -1,0 +1,32 @@
+# GCP service account keys
+*.json
+
+# Model checkpoints
+checkpoint-200000/
+*.bin
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.h5
+
+# GeoLite database
+*.mmdb
+
+# Output/test files
+*.svg
+*.png
+*.jpg
+*.PDF
+*.pdf
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Temp
+/tmp/
+*.tmp
+*.log
+nohup.out

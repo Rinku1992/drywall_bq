@@ -3,8 +3,10 @@
 # Manually managing azure-functions-worker may cause unexpected issues
 
 google-cloud-storage
+google-cloud-bigquery
+google-cloud-bigquery-storage
 google-cloud-secret-manager
-asyncpg
+db-dtypes
 vertexai==1.43.0
 google-auth
 google-oauth
@@ -17,6 +19,8 @@ pandas
 openpyxl
 scikit-image
 opencv-python
+geoip2
+roman
 numpy
 ruamel-yaml
 matplotlib

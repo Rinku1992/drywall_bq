@@ -4,8 +4,7 @@ pixel_aspect_ratio_to_feet: &pixel_aspect_ratio_to_feet ## Applicable for a Full
   area: 0.006384249662009915
 
 modelling:
-  tolerance_vertical: 5
-  tolerance_horizontal: 5
+  tolerance_angle: 10
   tolerance_vertical_join: 2
   tolerance_horizontal_join: 2
   tolerance_euclidean_join: 2.82

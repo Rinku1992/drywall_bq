@@ -6,6 +6,42 @@ __pycache__/
 # C extensions
 *.so
 
+
+# GCP service account keys
+*.json
+
+# Model checkpoints
+checkpoint-200000/
+*.bin
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.h5
+
+# GeoLite database
+*.mmdb
+
+# Output/test files
+*.svg
+*.png
+*.jpg
+*.PDF
+*.pdf
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Temp
+/tmp/
+*.tmp
+*.log
+nohup.out
+
+
+
 # Distribution / packaging
 .Python
 build/
@@ -133,23 +169,3 @@ __blobstorage__
 __queuestorage__
 __azurite_db*__.json
 .python_packages
-
-
-# --- Secrets (CRITICAL) ---
-prj-fbm-drywall-dev-*.json
-*.key
-.env
-
-# --- Large ML Files ---
-checkpoint-*/
-*.pth
-*.safetensors
-*.bin
-*.pkl
-
-# --- Generated Junk ---
-*.svg
-output/
-walls_2d.json
-walls_3d.json
-__pycache__/
