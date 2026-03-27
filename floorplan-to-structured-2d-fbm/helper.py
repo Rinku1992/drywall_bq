@@ -462,3 +462,4 @@ def phoenix_call(generate_content_lambda, max_retry=5, base_delay=1.0, pydantic_
             if n_iterations >= max_retry:
                 raise e
             temperature = min(0.5 * (n_iterations + 1) / max_retry, 0.5)
+            
