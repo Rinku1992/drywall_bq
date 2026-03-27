@@ -60,3 +60,19 @@ CloudRun:
     APIs:
         wall_detector: https://wall-detector-460679066182.us-central1.run.app
         polygon_to_structured_2d: https://polygon-to-structured-2d-fbm-460679066182.us-central1.run.app
+
+
+PostgreSQL:
+    host: 10.132.0.3
+    port: 5432
+    database: drywall_takeoff
+    user: postgres
+    password: Drywall@2026
+    min_pool_size: 2
+    max_pool_size: 10
+    table_name_projects: projects
+    table_name_plans: plans
+    table_name_models: models
+    table_name_sku: sku
+    table_name_model_revisions_2d: model_revisions_2d
+    table_name_model_revisions_3d: model_revisions_3d
