@@ -425,3 +425,40 @@ def load_section_from_page(wall_segmented_path, floor_plan_path, bounding_box_of
     output_path = Path(str(wall_segmented_path)).parent / f"wall_segmented_{section_name}.png"
     cv2.imwrite(str(output_path), wall_segmented_section)
     return output_path
+
+
+def phoenix_call(generate_content_lambda, max_retry=5, base_delay=1.0, pydantic_model=None):
+    """Call Vertex AI with retry logic and optional Pydantic validation."""
+    n_iterations = 0
+    temperature = 0
+    while n_iterations < max_retry:
+        try:
+            response = generate_content_lambda(temperature)
+            # --- Safely extract text even if SDK chunks it ---
+            if hasattr(response.candidates[0].content, 'parts'):
+                raw_text = "".join([part.text for part in response.candidates[0].content.parts])
+            else:
+                raw_text = response.text
+            # ------------------------------------------------------
+                
+            if pydantic_model:
+                json_response = json.loads(raw_text.strip("`json\n").replace("{{", '{').replace("}}", '}'))
+                response_json_pydantic = pydantic_model(**json_response)
+                return response_json_pydantic, json_response
+            return raw_text
+            
+        except (ResourceExhausted, ServiceUnavailable, DeadlineExceeded) as e:
+            n_iterations += 1
+            log_json("WARNING", "PHOENIX_CALL_RETRY", attempt=n_iterations,
+                     max_retry=max_retry, error=str(e), reason="rate_limit_or_unavailable")
+            if n_iterations >= max_retry:
+                raise e
+            sleep_time = base_delay * (2 ** (n_iterations - 1)) + uniform(0, 0.5)
+            sleep(sleep_time)
+        except Exception as e:
+            n_iterations += 1
+            log_json("WARNING", "PHOENIX_CALL_RETRY", attempt=n_iterations,
+                     max_retry=max_retry, error=str(e), reason="parse_or_generation_error")
+            if n_iterations >= max_retry:
+                raise e
+            temperature = min(0.5 * (n_iterations + 1) / max_retry, 0.5)
