@@ -823,7 +823,13 @@ async def floorplan_to_2d(request: Request):
             floorplan_page_sources = list()
             plan_types = list()
             for index, (floor_plan_vector, floor_plan_path) in enumerate(zip(floor_plan_paths_vector, floor_plan_paths_preprocessed)):
+                classify_start = time_module.perf_counter()
                 plan_type = classify_plan(floor_plan_path, vertex_ai_client_parameters)
+                classify_duration_ms = round((time_module.perf_counter() - classify_start) * 1000, 2)
+                log_json("INFO", "CLASSIFY_PLAN_COMPLETE",
+                         request_id=rid, page_number=index,
+                         plan_type=plan_type.get("plan_type", "UNKNOWN"),
+                         duration_ms=classify_duration_ms)
                 plan_types.append(plan_type)
                 floorplan_baseline_page_source = upload_floorplan(floor_plan_vector, plan_id, project_id, CREDENTIALS, index=str(index).zfill(2))
                 floorplan_baseline_page_sources.append(floorplan_baseline_page_source)
