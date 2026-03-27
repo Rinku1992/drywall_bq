@@ -28,3 +28,4 @@ pygltflib
 pillow
 fastapi
 uvicorn
+asyncpg
