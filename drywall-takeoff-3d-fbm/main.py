@@ -29,7 +29,11 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import math
 
-from preprocessing import preprocess
+# --- Change 1: Import at top of file ---
+# Change:
+#   from preprocessing import preprocess
+# To:
+from preprocessing import preprocess, reprocess_pages_hires
 from extrapolate_3d import Extrapolate3D
 from helper import (
     create_pg_pool,
@@ -668,29 +672,36 @@ async def floorplan_to_2d(request: Request):
                      floor_plan_pages=floor_indices,
                      all_types=[pt["plan_type"] for pt in plan_types])
 
+            # Re-convert FLOOR pages at high-res DPI=400
+            if floor_indices:
+                reprocess_pages_hires(pdf_path, floor_indices)
+                # Re-upload high-res versions for FLOOR pages
+                for fi in floor_indices:
+                    floorplan_page_sources[fi] = upload_floorplan(
+                        floor_plan_paths_preprocessed[fi], plan_id, project_id, CREDENTIALS,
+                        index=str(fi).zfill(2)
+                    )
+
+            # Dispatch Service 2 calls in parallel
             for index, plan_type in enumerate(plan_types):
                 if plan_type["plan_type"].upper().find("FLOOR") == -1:
                     continue
-                page_number = index
-                floorplan_page_source = floorplan_page_sources[index]
 
                 mask_factor = plan_type.get("mask_factor")
                 bounding_box_offsets = plan_type.get("bounding_box_offsets")
 
-                floorplan_to_structured_2d(
+                executor.submit(
+                    floorplan_to_structured_2d,
                     CREDENTIALS, id_token, project_id, plan_id, user_id,
-                    page_number, mask_factor, bounding_box_offsets
+                    index, mask_factor, bounding_box_offsets
                 )
 
             # Poll for results
-            for index, plan_type in enumerate(plan_types):
+            for page_number, (plan_type, _, floorplan_page_source) in enumerate(zip(plan_types, floorplan_baseline_page_sources, floorplan_page_sources)):
                 if plan_type["plan_type"].upper().find("FLOOR") == -1:
                     continue
-                page_number = index
-                floorplan_page_source = floorplan_page_sources[index]
-
+                timeout = from_unix_epoch() + 3600
                 poll_count = 0
-                timeout = from_unix_epoch() + 1800
                 while from_unix_epoch() < timeout:
                     query_output = await pg_fetch_all(
                         pg_pool,
@@ -700,28 +711,38 @@ async def floorplan_to_2d(request: Request):
                     )
                     poll_count += 1
                     if query_output:
-                        walls_2d = parse_jsonb(query_output[0]["model_2d"])
-                        if walls_2d and walls_2d.get("walls_2d") and walls_2d.get("polygons"):
-                            log_json("INFO", "POLL_COMPLETE", request_id=rid, step="poll_2d_model",
-                                     page_number=page_number, poll_iterations=poll_count)
-                            await pg_execute(
-                                pg_pool,
-                                "UPDATE models SET source = $1 WHERE LOWER(project_id) = LOWER($2) AND LOWER(plan_id) = LOWER($3) AND page_number = $4",
-                                [floorplan_page_source, project_id, plan_id, page_number],
-                                query_name="floorplan_to_2d__update_source"
-                            )
-                            page = dict(
-                                plan_id=plan_id,
-                                page_number=page_number,
-                                page_type=plan_type["plan_type"].upper(),
-                                scale=query_output[0]["scale"],
-                                walls_2d=walls_2d["walls_2d"],
-                                polygons=walls_2d["polygons"],
-                                **walls_2d.get("metadata", dict())
-                            )
-                            walls_2d_all["pages"].append(page)
-                            break
+                        break
                     await asyncio.sleep(2)
+
+                log_json("INFO", "POLL_COMPLETE", request_id=rid, step="poll_2d_model",
+                         page_number=page_number, poll_iterations=poll_count)
+
+                model_2d_raw = query_output[0]["model_2d"] if query_output else None
+                walls_2d = parse_jsonb(model_2d_raw) if model_2d_raw else None
+                if not walls_2d or not walls_2d.get("polygons") or not walls_2d.get("walls_2d"):
+                    await pg_execute(
+                        pg_pool,
+                        "DELETE FROM models WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3",
+                        [project_id, plan_id, page_number],
+                        query_name="floorplan_to_2d__delete_empty_model"
+                    )
+                    continue
+                await pg_execute(
+                    pg_pool,
+                    "UPDATE models SET source = $1 WHERE LOWER(project_id) = LOWER($2) AND LOWER(plan_id) = LOWER($3) AND page_number = $4",
+                    [floorplan_page_source, project_id, plan_id, page_number],
+                    query_name="floorplan_to_2d__update_source"
+                )
+                page = dict(
+                    plan_id=plan_id,
+                    page_number=page_number,
+                    page_type=plan_type["plan_type"].upper(),
+                    scale=query_output[0]["scale"],
+                    walls_2d=walls_2d["walls_2d"],
+                    polygons=walls_2d["polygons"],
+                    **walls_2d.get("metadata", dict())
+                )
+                walls_2d_all["pages"].append(page)
 
     except Exception as e:
         log_json("ERROR", "FLOORPLAN_EXTRACTION_FAILED", request_id=rid, error=str(e))
