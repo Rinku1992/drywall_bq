@@ -33,7 +33,9 @@ from prompt import (
 from helper import (
     load_vertex_ai_client,
     phoenix_call,
-    polygon_to_structured_2d
+    polygon_to_structured_2d,
+    extract_wall_dimension_candidates,
+    log_json,
 )
 
 __all__ = ["FloorPlan2D"]
@@ -1217,13 +1219,27 @@ class FloorPlan2D(FloorPlan):
             transcription_entries.append(dict(text=transcription, centroid=dict(X=centroid[0], Y=centroid[1])))
         _, canvas_buffer_array = cv2.imencode(".png", canvas_cropped)
         bytes_canvas = canvas_buffer_array.tobytes()
-        perimeter_lines = list()
+        # Pre-compute dimension candidates for each wall
+        pixel_aspect_ratio = self._hyperparameters["modelling"]["pixel_aspect_ratio"]
+
+        wall_specs = list()
         for wall in walls:
             X1, Y1, X2, Y2 = wall[0]
-            perimeter_line = dict(wall=dict(X1=int(X1), Y1=int(Y1), X2=int(X2), Y2=int(Y2)))
-            if perimeter_line not in perimeter_lines:
-                perimeter_lines.append(perimeter_line)
-        polygon = dict(vertices=vertices.tolist(), perimeter_wall_lines=list(perimeter_lines), transcription_entries=transcription_entries)
+            candidates = extract_wall_dimension_candidates(
+                [X1, Y1, X2, Y2], nearest_transcription_blocks, pixel_aspect_ratio
+            )
+            wall_spec = dict(
+                wall=dict(X1=int(X1), Y1=int(Y1), X2=int(X2), Y2=int(Y2)),
+                dimension_candidates=candidates
+            )
+            wall_specs.append(wall_spec)
+        total_candidates = sum(len(ws["dimension_candidates"]) for ws in wall_specs)
+        high_confidence = sum(1 for ws in wall_specs if ws["dimension_candidates"] and ws["dimension_candidates"][0]["confidence"] == "high")
+        log_json("INFO", "DIMENSION_PRECOMPUTE",
+                 total_walls=len(wall_specs),
+                 total_candidates=total_candidates,
+                 high_confidence_walls=high_confidence)
+        polygon = dict(vertices=vertices.tolist(), perimeter_wall_lines=wall_specs, transcription_entries=transcription_entries)
         query = Content(role="user", parts=[
             Part.from_text(json.dumps(polygon)),
             Part.from_data(data=bytes_canvas, mime_type="image/png")
@@ -1263,9 +1279,16 @@ class FloorPlan2D(FloorPlan):
                 dimension_wall_rectified = verify_tolerance_distance(dimension_wall_predicted, wall_unnormalized, dimension_wall_predicted["confidence_length"])
                 dimension_wall_rectified["height"] = verify_tolerance_height(dimension_wall_predicted["height"], dimension_wall_predicted["confidence_height"])
                 model_polygon["wall_parameters"][index] = dimension_wall_rectified
+                log_json("INFO", "DRYWALL_PREDICTION_SUCCESS",
+                     room_name=model_polygon.get("ceiling", {}).get("room_name", ""),
+                     n_walls=len(model_polygon.get("wall_parameters", [])))
         except Exception as e:
         #else:
-            logging.warning(f"SYSTEM: Drywall prediction for polygon: {json.dumps(polygon)} failed with error: {e}")
+            log_json("WARNING", "DRYWALL_PREDICTION_FAILED",
+                     error=str(e),
+                     n_walls=len(walls),
+                     n_transcription_entries=len(transcription_entries),
+                     n_dimension_candidates=sum(len(ws.get("dimension_candidates", [])) for ws in wall_specs))
             #logging.warning(f"SYSTEM: Drywall prediction for polygon: {json.dumps(polygon)} failed")
             model_polygon = {
                 "ceiling": {
