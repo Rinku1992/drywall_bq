@@ -693,7 +693,7 @@ async def floorplan_to_2d(request: Request):
                 executor.submit(
                     floorplan_to_structured_2d,
                     CREDENTIALS, id_token, project_id, plan_id, user_id,
-                    index, mask_factor, bounding_box_offsets
+                    str(index).zfill(2), mask_factor, bounding_box_offsets
                 )
 
             # Poll for results
