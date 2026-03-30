@@ -13,7 +13,7 @@ import hashlib
 import asyncio
 from pathlib import Path
 from contextlib import asynccontextmanager
-
+import re
 import asyncpg
 import cv2
 from time import sleep
@@ -372,38 +372,6 @@ def transcribe(credentials, hyperparameters, floor_plan_path):
     transcriber = Transcriber(credentials, hyperparameters)
     return transcriber.transcribe(floor_plan_path, [0, 1, -1, -2])
 
-
-def phoenix_call(generate_content_lambda, max_retry=5, base_delay=1.0, pydantic_model=None):
-    """Call Vertex AI with retry logic and optional Pydantic validation."""
-    n_iterations = 0
-    temperature = 0
-    while n_iterations < max_retry:
-        try:
-            response = generate_content_lambda(temperature)
-            if pydantic_model:
-                json_response = json.loads(response.text.strip("`json").replace("{{", '{').replace("}}", '}'))
-                response_json_pydantic = pydantic_model(**json_response)
-                return response_json_pydantic, json_response
-            return response.text
-        except (ResourceExhausted, ServiceUnavailable, DeadlineExceeded) as e:
-            n_iterations += 1
-            if n_iterations >= max_retry:
-                raise e
-            sleep_time = base_delay * (2 ** (n_iterations - 1)) + uniform(0, 0.5)
-            sleep(sleep_time)
-            log_json("WARNING", "PHOENIX_CALL_RETRY",
-                     attempt=n_iterations, max_retry=max_retry,
-                     reason="rate_limit_or_unavailable", error=str(e))
-        except Exception as e:
-            n_iterations += 1
-            if n_iterations >= max_retry:
-                raise e
-            temperature = min(0.5 * (n_iterations + 1) / max_retry, 0.5)
-            log_json("WARNING", "PHOENIX_CALL_RETRY",
-                     attempt=n_iterations, max_retry=max_retry,
-                     reason="parse_or_generation_error", error=str(e))
-
-
 def load_section_from_page(wall_segmented_path, floor_plan_path, bounding_box_offset, section_name):
     """Extract a section from a page using bounding box offset."""
     offset_top_left = bounding_box_offset.get("offset_top_left", (0, 0))
@@ -463,3 +431,93 @@ def phoenix_call(generate_content_lambda, max_retry=5, base_delay=1.0, pydantic_
                 raise e
             temperature = min(0.5 * (n_iterations + 1) / max_retry, 0.5)
             
+
+# ---------------------------------------------------------------------------
+# Dimension Pre-Processing Utilities
+# ---------------------------------------------------------------------------
+
+def parse_dimension_text(text):
+    """Parse architectural dimension text to feet.
+    Handles: 12'-6" → 12.5, 12' → 12.0, 6" → 0.5
+    Returns float in feet, or None if unparseable.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    text = text.strip()
+    # Try feet-inches format: 12'-6", 12'6"
+    match = re.match(r"(\d+)'-?(\d+)?\"?", text)
+    if match:
+        feet = int(match.group(1))
+        inches = int(match.group(2) or 0)
+        return round(feet + inches / 12, 2)
+    # Try inches-only format: 6"
+    match = re.match(r"(\d+)\"", text)
+    if match:
+        return round(int(match.group(1)) / 12, 2)
+    return None
+
+
+def point_to_line_distance(point, wall_endpoints):
+    """Perpendicular distance from point (x, y) to line segment [x1, y1, x2, y2].
+    Returns distance in pixels.
+    """
+    px, py = point
+    x1, y1, x2, y2 = wall_endpoints
+    dx = x2 - x1
+    dy = y2 - y1
+    if dx == 0 and dy == 0:
+        return math.hypot(px - x1, py - y1)
+    t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
+    nearest_x = x1 + t * dx
+    nearest_y = y1 + t * dy
+    return math.hypot(px - nearest_x, py - nearest_y)
+
+
+def extract_wall_dimension_candidates(wall_endpoints, ocr_entries, pixel_aspect_ratio, max_distance=150):
+    """Pre-compute likely dimensions for a wall from nearby OCR text.
+    
+    Args:
+        wall_endpoints: [x1, y1, x2, y2]
+        ocr_entries: dict {text: (centroid_x, centroid_y)}
+        pixel_aspect_ratio: dict with 'horizontal' and 'vertical' keys
+        max_distance: max pixel distance for OCR to be considered
+    
+    Returns:
+        List of top 3 candidates sorted by confidence:
+        [{"dimension_ft": 12.5, "confidence": "high", "source_text": "12'-6\""}, ...]
+    """
+    x1, y1, x2, y2 = wall_endpoints
+    wall_length_px = math.hypot(x2 - x1, y2 - y1)
+    if wall_length_px == 0:
+        return []
+
+    candidates = []
+    for text, centroid in ocr_entries.items():
+        cx, cy = centroid[0], centroid[1]
+        dim_ft = parse_dimension_text(text)
+        if dim_ft is None:
+            continue
+        dist = point_to_line_distance((cx, cy), wall_endpoints)
+        if dist > max_distance:
+            continue
+        # Estimate expected pixel length from parsed dimension
+        dim_px_expected = dim_ft / pixel_aspect_ratio.get("horizontal", 0.07)
+        dimension_match = abs(dim_px_expected - wall_length_px) / max(wall_length_px, 1)
+
+        if dist < 50 and dimension_match < 0.10:
+            confidence = "high"
+        elif dist < 100 and dimension_match < 0.25:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        candidates.append({
+            "dimension_ft": dim_ft,
+            "confidence": confidence,
+            "distance_px": round(dist, 1),
+            "source_text": text
+        })
+
+    confidence_order = {"high": 0, "medium": 1, "low": 2}
+    candidates.sort(key=lambda c: (confidence_order[c["confidence"]], c["distance_px"]))
+    return candidates[:3]
