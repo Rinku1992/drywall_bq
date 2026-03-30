@@ -31,11 +31,10 @@ def to_sharp(image_path_page):
     cv2.imwrite(output_path, sharpened)
     return sharpened
 
+
 def preprocess(pdf_path, image_path="/tmp/floor_plan.png"):
-    pages = convert_from_path(
-        pdf_path,
-        dpi=400,
-    )
+    # Low-res pass: all pages at DPI=150 (fast, for classification only)
+    pages = convert_from_path(pdf_path, dpi=150)
     reader = PdfReader(pdf_path)
     image_path_pages = list()
     vector_pdf_pages = list()
@@ -59,3 +58,20 @@ def preprocess(pdf_path, image_path="/tmp/floor_plan.png"):
         [future.result() for future in futures]
 
     return vector_pdf_pages, image_path_pages
+
+
+def reprocess_pages_hires(pdf_path, page_indices, image_path="/tmp/floor_plan.png"):
+    """Re-convert specific pages at DPI=400 for FLOOR plan processing."""
+    image_path = Path(image_path)
+    
+    def _reprocess_single(page_index):
+        page_num = page_index + 1  # pdf2image uses 1-based indexing
+        pages_hires = convert_from_path(pdf_path, dpi=400, first_page=page_num, last_page=page_num)
+        if pages_hires:
+            image_path_page = image_path.parent.joinpath(image_path.stem).with_suffix(f".{str(page_index).zfill(2)}{image_path.suffix}")
+            pages_hires[0].save(image_path_page, "PNG")
+            to_sharp(image_path_page)
+    
+    with ThreadPoolExecutor(max_workers=min(len(page_indices), 5)) as executor:
+        futures = [executor.submit(_reprocess_single, pi) for pi in page_indices]
+        [f.result() for f in futures]
