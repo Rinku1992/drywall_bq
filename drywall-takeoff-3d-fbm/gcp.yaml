@@ -32,9 +32,6 @@ VertexAI:
             - australia-southeast1: [-33.8688, 151.2093] 
         parameters:
             temperature: 0
-            seed: 0
-            top_p: 0.1
-            top_k: 1
             response_mime_type: application/json
         max_retry: 5
 
