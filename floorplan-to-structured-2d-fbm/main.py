@@ -169,7 +169,7 @@ def page_to_structured_2d(
     )
     walls_2d, polygons, walls_2d_path, external_contour = floor_plan_modeller_2d.model(
         image_path=wall_segmented_sectioned_path,
-        model_2d_path=f"/tmp/{project_id}/{plan_id}/{user_id}/walls_2d_{str(page_number).zfill(2)}.json",
+        model_2d_path=f"/tmp/{project_id}/{plan_id}/{user_id}/walls_2d_{str(page_number).zfill(4)}.json",
         floor_plan_path=floor_plan_processed_path,
         transcription_block_with_centroids=transcription_block_with_centroids,
         transcription_headers_and_footers=transcription_headers_and_footers,
@@ -184,7 +184,7 @@ def page_to_structured_2d(
         )
         floorplan_baseline_page_source = upload_floorplan(
             floorplan_baseline, plan_id, project_id, credentials,
-            index=str(page_number).zfill(2)
+            index=str(page_number).zfill(4)
         )
 
         metadata = dict(
@@ -321,7 +321,7 @@ async def floorplan_to_structured_2d(request: Request):
     mask = params.get("mask")
     bounding_box_offsets = params.get("bounding_box_offsets")
     verbose = params.get("verbose", "False")
-    page_number_padded = str(page_number).zfill(2)
+    page_number_padded = str(page_number).zfill(4)
 
     log_json("INFO", "REQUEST_PARAMS", request_id=rid,
              project_id=project_id, plan_id=plan_id, user_id=user_id, page_number=page_number)
