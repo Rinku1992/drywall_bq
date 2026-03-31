@@ -310,11 +310,10 @@ async def load_templates(pool, credentials):
             continue
         cached_templates_sku.append(product_template["sku_id"])
         product_template["sku_variant"] = f"{product_template['sku_id']} - {product_template['sku_description']}"
-        product_template["color_code"] = [
-            product_template["color_code"]['b'],
-            product_template["color_code"]['g'],
-            product_template["color_code"]['r']
-        ]
+        color_code = product_template["color_code"]
+        if isinstance(color_code, str):
+            color_code = json.loads(color_code)
+        product_template["color_code"] = [color_code['b'], color_code['g'], color_code['r']]
         product_templates_target.append(product_template)
     log_json("INFO", "TEMPLATES_LOADED", template_count=len(product_templates_target))
     return jsonable_encoder(product_templates_target)
