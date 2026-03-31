@@ -648,8 +648,8 @@ async def floorplan_to_2d(request: Request):
 
     def process_single_page(index, floor_plan_vector, floor_plan_path, creds):
         p_type = classify_plan(floor_plan_path, vertex_ai_client_parameters)
-        baseline_src = upload_floorplan(floor_plan_vector, plan_id, project_id, creds, index=str(index).zfill(2))
-        page_src = upload_floorplan(floor_plan_path, plan_id, project_id, creds, index=str(index).zfill(2))
+        baseline_src = upload_floorplan(floor_plan_vector, plan_id, project_id, creds, index=str(index).zfill(4))
+        page_src = upload_floorplan(floor_plan_path, plan_id, project_id, creds, index=str(index).zfill(4))
         return p_type, baseline_src, page_src
 
     try:
@@ -679,7 +679,7 @@ async def floorplan_to_2d(request: Request):
                 for fi in floor_indices:
                     floorplan_page_sources[fi] = upload_floorplan(
                         floor_plan_paths_preprocessed[fi], plan_id, project_id, CREDENTIALS,
-                        index=str(fi).zfill(2)
+                        index=str(fi).zfill(4)
                     )
 
             # Dispatch Service 2 calls in parallel
@@ -693,7 +693,7 @@ async def floorplan_to_2d(request: Request):
                 executor.submit(
                     floorplan_to_structured_2d,
                     CREDENTIALS, id_token, project_id, plan_id, user_id,
-                    str(index).zfill(2), mask_factor, bounding_box_offsets
+                    str(index).zfill(4), mask_factor, bounding_box_offsets
                 )
 
             # Poll for results
@@ -889,12 +889,12 @@ async def floorplan_to_3d(request: Request):
     scale = row["scale"]
     model_2d = parse_jsonb(row["model_2d"])
 
-    model_2d_path = f"/tmp/{project_id}/{plan_id}/{user_id}/walls_2d_{str(index).zfill(2)}.json"
+    model_2d_path = f"/tmp/{project_id}/{plan_id}/{user_id}/walls_2d_{str(index).zfill(4)}.json"
     Path(model_2d_path).parent.mkdir(parents=True, exist_ok=True)
     with open(model_2d_path, 'w') as f:
         json.dump([model_2d.get("walls_2d", []), model_2d.get("polygons", [])], f)
 
-    polygons_path = f"/tmp/{project_id}/{plan_id}/{user_id}/polygons_{str(index).zfill(2)}.json"
+    polygons_path = f"/tmp/{project_id}/{plan_id}/{user_id}/polygons_{str(index).zfill(4)}.json"
     with open(polygons_path, 'w') as f:
         json.dump(model_2d.get("polygons", []), f)
 
@@ -909,9 +909,9 @@ async def floorplan_to_3d(request: Request):
     metadata = parse_jsonb(model_2d.get("metadata")) if model_2d else None
 
     async with timed_step("upload_3d_assets", request_id=rid):
-        upload_floorplan(model_3d_path, plan_id, project_id, CREDENTIALS, index=str(index).zfill(2))
+        upload_floorplan(model_3d_path, plan_id, project_id, CREDENTIALS, index=str(index).zfill(4))
         for gltf_path in gltf_paths:
-            upload_floorplan(gltf_path, plan_id, project_id, CREDENTIALS, index=str(index).zfill(2), directory="gltf")
+            upload_floorplan(gltf_path, plan_id, project_id, CREDENTIALS, index=str(index).zfill(4), directory="gltf")
 
     await insert_model_3d(dict(walls_3d=walls_3d, polygons=polygons_3d), scale, index, plan_id, user_id, project_id, pg_pool, CREDENTIALS)
 
