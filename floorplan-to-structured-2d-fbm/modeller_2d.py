@@ -33,7 +33,6 @@ from prompt import (
 from helper import (
     load_vertex_ai_client,
     phoenix_call,
-    polygon_to_structured_2d,
     extract_wall_dimension_candidates,
     log_json,
 )
