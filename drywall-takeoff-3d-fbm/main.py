@@ -29,10 +29,6 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import math
 
-# --- Change 1: Import at top of file ---
-# Change:
-#   from preprocessing import preprocess
-# To:
 from preprocessing import preprocess, reprocess_pages_hires
 from extrapolate_3d import Extrapolate3D
 from helper import (
@@ -46,7 +42,6 @@ from helper import (
     get_gcs_client,
     load_gcp_credentials,
     load_hyperparameters,
-    enable_logging_on_stdout,
     sha256,
     upload_floorplan,
     insert_model_2d,
@@ -452,22 +447,25 @@ async def generate_project(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/generate_project")
+
     pool_err = require_pool(pg_pool, "/generate_project", rid)
     if pool_err: return pool_err
 
-    params = get_params(request.query_params, None)
+    parameters = dict(request.query_params)
     try: body = await request.json()
     except Exception: body = dict()
-    try: payload_project = PayloadProject(**params if params else body)
+    try: payload_project = PayloadProject(**parameters)
     except (ValidationError, Exception):
         try: payload_project = PayloadProject(**body)
         except (ValidationError, Exception) as e:
+            log_json("WARNING", "VALIDATION_FAILED", request_id=rid, endpoint="/generate_project", error=str(e))
             return respond_with_UI_payload(dict(error=f"Invalid project payload: {e}"), status_code=400)
 
     created_at = await insert_project(payload_project, pg_pool, CREDENTIALS, rid=rid)
 
     log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/generate_project",
-             total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2))
+             total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2),
+             project_id=payload_project.project_id)
     return respond_with_UI_payload(dict(project_id=payload_project.project_id, project_name=payload_project.project_name, created_at=created_at))
 
 
@@ -476,6 +474,7 @@ async def load_projects(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/load_projects")
+
     pool_err = require_pool(pg_pool, "/load_projects", rid)
     if pool_err: return pool_err
 
@@ -493,13 +492,15 @@ async def load_project_plans(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/load_project_plans")
+
     pool_err = require_pool(pg_pool, "/load_project_plans", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["project_id"], "/load_project_plans", rid)
     if not valid: return err
@@ -525,13 +526,15 @@ async def generate_floorplan_upload_signed_URL(request: Request) -> str:
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/generate_floorplan_upload_signed_URL")
+
     pool_err = require_pool(pg_pool, "/generate_floorplan_upload_signed_URL", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["project_id", "user_id", "plan"], "/generate_floorplan_upload_signed_URL", rid)
     if not valid: return err
@@ -563,45 +566,66 @@ async def load_plan_pages(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/load_plan_pages")
+
     pool_err = require_pool(pg_pool, "/load_plan_pages", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["project_id", "plan_id"], "/load_plan_pages", rid)
     if not valid: return err
+    project_id = params["project_id"]
+    plan_id = params["plan_id"]
 
     rows = await pg_fetch_all(
         pg_pool, "SELECT * FROM models WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2)",
-        [params["project_id"], params["plan_id"]], query_name="load_plan_pages"
+        [project_id, plan_id], query_name="load_plan_pages"
     )
     records = [dict(row) for row in rows]
     plan_metadata = records[0] if records else dict()
 
     log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/load_plan_pages",
-             total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2))
+             total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2),
+             page_count=len(records))
     return respond_with_UI_payload(dict(plan_metadata=plan_metadata, plan_pages=records))
 
+
+# ---------------------------------------------------------------------------
+# FIX: /floorplan_to_2d — ThreadPoolExecutor lifecycle
+#
+# Previously, Service 2 dispatch (floorplan_to_structured_2d) was submitted
+# inside the `with ThreadPoolExecutor` block. Python's executor.__exit__
+# calls shutdown(wait=True), which blocks until ALL submitted futures
+# complete — including the 1800s timeout HTTP calls to Service 2.
+# This means the polling loop NEVER started until Service 2 finished,
+# defeating the purpose of async polling.
+#
+# Fix: Close the executor after classification + upload (Phase 1), then
+# dispatch Service 2 calls via a NEW fire-and-forget executor that we
+# do NOT wait on, and immediately begin polling.
+# ---------------------------------------------------------------------------
 
 @app.post("/floorplan_to_2d")
 async def floorplan_to_2d(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/floorplan_to_2d")
+
     pool_err = require_pool(pg_pool, "/floorplan_to_2d", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["project_id", "user_id", "plan_id"], "/floorplan_to_2d", rid)
     if not valid: return err
-
     project_id = params["project_id"]
     user_id = params["user_id"]
     plan_id = params["plan_id"]
@@ -655,94 +679,104 @@ async def floorplan_to_2d(request: Request):
     try:
         id_token = load_floorplan_to_structured_2d_ID_token(CREDENTIALS)
 
+        # --- Phase 1: Classify pages + upload (parallel, wait for all) ---
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = list()
             for index, (floor_plan_vector, floor_plan_path) in enumerate(zip(floor_plan_paths_vector, floor_plan_paths_preprocessed)):
                 futures.append(executor.submit(process_single_page, index, floor_plan_vector, floor_plan_path, CREDENTIALS))
             results = [future.result() for future in futures]
+        # executor is now shut down — all classification/upload work is done
 
-            plan_types = [r[0] for r in results]
-            floorplan_baseline_page_sources = [r[1] for r in results]
-            floorplan_page_sources = [r[2] for r in results]
+        plan_types = [r[0] for r in results]
+        floorplan_baseline_page_sources = [r[1] for r in results]
+        floorplan_page_sources = [r[2] for r in results]
 
-            floor_indices = [i for i, pt in enumerate(plan_types) if pt["plan_type"].upper().find("FLOOR") != -1]
+        floor_indices = [i for i, pt in enumerate(plan_types) if pt["plan_type"].upper().find("FLOOR") != -1]
 
-            log_json("INFO", "CLASSIFICATION_COMPLETE", request_id=rid,
-                     total_pages=len(plan_types),
-                     floor_plan_pages=floor_indices,
-                     all_types=[pt["plan_type"] for pt in plan_types])
+        log_json("INFO", "CLASSIFICATION_COMPLETE", request_id=rid,
+                 total_pages=len(plan_types),
+                 floor_plan_pages=floor_indices,
+                 all_types=[pt["plan_type"] for pt in plan_types])
 
-            # Re-convert FLOOR pages at high-res DPI=400
-            if floor_indices:
-                reprocess_pages_hires(pdf_path, floor_indices)
-                # Re-upload high-res versions for FLOOR pages
-                for fi in floor_indices:
-                    floorplan_page_sources[fi] = upload_floorplan(
-                        floor_plan_paths_preprocessed[fi], plan_id, project_id, CREDENTIALS,
-                        index=str(fi).zfill(4)
-                    )
-
-            # Dispatch Service 2 calls in parallel
-            for index, plan_type in enumerate(plan_types):
-                if plan_type["plan_type"].upper().find("FLOOR") == -1:
-                    continue
-
-                mask_factor = plan_type.get("mask_factor")
-                bounding_box_offsets = plan_type.get("bounding_box_offsets")
-
-                executor.submit(
-                    floorplan_to_structured_2d,
-                    CREDENTIALS, id_token, project_id, plan_id, user_id,
-                    str(index).zfill(4), mask_factor, bounding_box_offsets
+        # Re-convert FLOOR pages at high-res DPI=400
+        if floor_indices:
+            reprocess_pages_hires(pdf_path, floor_indices)
+            # Re-upload high-res versions for FLOOR pages
+            for fi in floor_indices:
+                floorplan_page_sources[fi] = upload_floorplan(
+                    floor_plan_paths_preprocessed[fi], plan_id, project_id, CREDENTIALS,
+                    index=str(fi).zfill(4)
                 )
 
-            # Poll for results
-            for page_number, (plan_type, _, floorplan_page_source) in enumerate(zip(plan_types, floorplan_baseline_page_sources, floorplan_page_sources)):
-                if plan_type["plan_type"].upper().find("FLOOR") == -1:
-                    continue
-                timeout = from_unix_epoch() + 3600
-                poll_count = 0
-                while from_unix_epoch() < timeout:
-                    query_output = await pg_fetch_all(
-                        pg_pool,
-                        "SELECT scale, model_2d FROM models WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3",
-                        [project_id, plan_id, page_number],
-                        query_name="floorplan_to_2d__poll_model"
-                    )
-                    poll_count += 1
-                    if query_output:
-                        break
-                    await asyncio.sleep(2)
+        # --- Phase 2: Fire-and-forget Service 2 dispatch ---
+        # Use a separate executor that we do NOT enter via `with` so its
+        # __exit__ doesn't block the async polling loop below.
+        dispatch_executor = ThreadPoolExecutor(max_workers=len(floor_indices) or 1)
+        for index, plan_type in enumerate(plan_types):
+            if plan_type["plan_type"].upper().find("FLOOR") == -1:
+                continue
 
-                log_json("INFO", "POLL_COMPLETE", request_id=rid, step="poll_2d_model",
-                         page_number=page_number, poll_iterations=poll_count)
+            mask_factor = plan_type.get("mask_factor")
+            bounding_box_offsets = plan_type.get("bounding_box_offsets")
 
-                model_2d_raw = query_output[0]["model_2d"] if query_output else None
-                walls_2d = parse_jsonb(model_2d_raw) if model_2d_raw else None
-                if not walls_2d or not walls_2d.get("polygons") or not walls_2d.get("walls_2d"):
-                    await pg_execute(
-                        pg_pool,
-                        "DELETE FROM models WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3",
-                        [project_id, plan_id, page_number],
-                        query_name="floorplan_to_2d__delete_empty_model"
-                    )
-                    continue
+            dispatch_executor.submit(
+                floorplan_to_structured_2d,
+                CREDENTIALS, id_token, project_id, plan_id, user_id,
+                str(index).zfill(4), mask_factor, bounding_box_offsets
+            )
+        # Don't call dispatch_executor.shutdown() here — let the threads run
+        # in the background. We'll shut it down after polling completes.
+
+        # --- Phase 3: Poll for results (async, non-blocking) ---
+        for page_number, (plan_type, _, floorplan_page_source) in enumerate(zip(plan_types, floorplan_baseline_page_sources, floorplan_page_sources)):
+            if plan_type["plan_type"].upper().find("FLOOR") == -1:
+                continue
+            timeout = from_unix_epoch() + 3600
+            poll_count = 0
+            while from_unix_epoch() < timeout:
+                query_output = await pg_fetch_all(
+                    pg_pool,
+                    "SELECT scale, model_2d FROM models WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3",
+                    [project_id, plan_id, page_number],
+                    query_name="floorplan_to_2d__poll_model"
+                )
+                poll_count += 1
+                if query_output:
+                    break
+                await asyncio.sleep(2)
+
+            log_json("INFO", "POLL_COMPLETE", request_id=rid, step="poll_2d_model",
+                     page_number=page_number, poll_iterations=poll_count)
+
+            model_2d_raw = query_output[0]["model_2d"] if query_output else None
+            walls_2d = parse_jsonb(model_2d_raw) if model_2d_raw else None
+            if not walls_2d or not walls_2d.get("polygons") or not walls_2d.get("walls_2d"):
                 await pg_execute(
                     pg_pool,
-                    "UPDATE models SET source = $1 WHERE LOWER(project_id) = LOWER($2) AND LOWER(plan_id) = LOWER($3) AND page_number = $4",
-                    [floorplan_page_source, project_id, plan_id, page_number],
-                    query_name="floorplan_to_2d__update_source"
+                    "DELETE FROM models WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3",
+                    [project_id, plan_id, page_number],
+                    query_name="floorplan_to_2d__delete_empty_model"
                 )
-                page = dict(
-                    plan_id=plan_id,
-                    page_number=page_number,
-                    page_type=plan_type["plan_type"].upper(),
-                    scale=query_output[0]["scale"],
-                    walls_2d=walls_2d["walls_2d"],
-                    polygons=walls_2d["polygons"],
-                    **walls_2d.get("metadata", dict())
-                )
-                walls_2d_all["pages"].append(page)
+                continue
+            await pg_execute(
+                pg_pool,
+                "UPDATE models SET source = $1 WHERE LOWER(project_id) = LOWER($2) AND LOWER(plan_id) = LOWER($3) AND page_number = $4",
+                [floorplan_page_source, project_id, plan_id, page_number],
+                query_name="floorplan_to_2d__update_source"
+            )
+            page = dict(
+                plan_id=plan_id,
+                page_number=page_number,
+                page_type=plan_type["plan_type"].upper(),
+                scale=query_output[0]["scale"],
+                walls_2d=walls_2d["walls_2d"],
+                polygons=walls_2d["polygons"],
+                **walls_2d.get("metadata", dict())
+            )
+            walls_2d_all["pages"].append(page)
+
+        # Clean up the dispatch executor now that polling is done
+        dispatch_executor.shutdown(wait=False)
 
     except Exception as e:
         log_json("ERROR", "FLOORPLAN_EXTRACTION_FAILED", request_id=rid, error=str(e))
@@ -766,33 +800,201 @@ async def floorplan_to_2d(request: Request):
     return respond_with_UI_payload(walls_2d_all)
 
 
+@app.post("/load_2d_revision")
+async def load_2d_revision(request: Request):
+    rid = str(uuid.uuid4())[:8]
+    request_start = time_module.perf_counter()
+    log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/load_2d_revision")
+
+    pool_err = require_pool(pg_pool, "/load_2d_revision", rid)
+    if pool_err: return pool_err
+
+    params = get_params(request.query_params, None)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
+
+    valid, err = validate_required(params, ["project_id", "plan_id", "page_number", "revision_number"], "/load_2d_revision", rid)
+    if not valid: return err
+
+    project_id = params["project_id"]
+    plan_id = params["plan_id"]
+    page_number = int(params["page_number"])
+    revision_number = int(params["revision_number"])
+
+    row = await pg_fetch_one(
+        pg_pool,
+        "SELECT model FROM model_revisions_2d WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3 AND revision_number = $4",
+        [project_id, plan_id, page_number, revision_number],
+        query_name="load_2d_revision"
+    )
+    walls_2d_JSON = parse_jsonb(row["model"]) if row else dict()
+
+    log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/load_2d_revision",
+             total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2))
+    return respond_with_UI_payload(walls_2d_JSON)
+
+
+@app.post("/load_available_revision_numbers_2d")
+async def load_available_revision_numbers_2d(request: Request):
+    rid = str(uuid.uuid4())[:8]
+    request_start = time_module.perf_counter()
+    log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/load_available_revision_numbers_2d")
+
+    pool_err = require_pool(pg_pool, "/load_available_revision_numbers_2d", rid)
+    if pool_err: return pool_err
+
+    params = get_params(request.query_params, None)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
+
+    valid, err = validate_required(params, ["project_id", "plan_id", "page_number"], "/load_available_revision_numbers_2d", rid)
+    if not valid: return err
+    project_id = params["project_id"]
+    plan_id = params["plan_id"]
+    page_number = int(params["page_number"])
+
+    rows = await pg_fetch_all(
+        pg_pool,
+        "SELECT revision_number FROM model_revisions_2d WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3",
+        [project_id, plan_id, page_number],
+        query_name="load_available_revision_numbers_2d"
+    )
+    revision_numbers = [row["revision_number"] for row in rows if row["revision_number"] is not None]
+
+    log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/load_available_revision_numbers_2d",
+             total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2),
+             revision_count=len(revision_numbers))
+    return respond_with_UI_payload(revision_numbers)
+
+
+@app.post("/load_2d_all")
+async def load_2d_all(request: Request):
+    rid = str(uuid.uuid4())[:8]
+    request_start = time_module.perf_counter()
+    log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/load_2d_all")
+
+    pool_err = require_pool(pg_pool, "/load_2d_all", rid)
+    if pool_err: return pool_err
+
+    params = get_params(request.query_params, None)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
+
+    valid, err = validate_required(params, ["project_id", "plan_id"], "/load_2d_all", rid)
+    if not valid: return err
+    project_id = params["project_id"]
+    plan_id = params["plan_id"]
+    page_number = params.get("page_number", '')
+
+    plan_row = await pg_fetch_one(
+        pg_pool,
+        "SELECT pages, status FROM plans WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2)",
+        [project_id, plan_id],
+        query_name="load_2d_all__get_plan"
+    )
+    if not plan_row:
+        return respond_with_UI_payload(dict(error="Floor Plan does not exist"))
+
+    n_pages = plan_row["pages"]
+    status = plan_row["status"]
+    timeout = from_unix_epoch() + (n_pages * 120)
+    poll_count = 0
+    while status != "COMPLETED" and from_unix_epoch() < timeout:
+        await asyncio.sleep(2)
+        status_row = await pg_fetch_one(
+            pg_pool,
+            "SELECT status FROM plans WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2)",
+            [project_id, plan_id],
+            query_name="load_2d_all__poll_status"
+        )
+        poll_count += 1
+        if not status_row:
+            return respond_with_UI_payload(dict(error="Floor Plan does not exist"), status_code=500)
+        status = status_row["status"]
+
+    log_json("INFO", "POLL_COMPLETE", request_id=rid, step="poll_plan_status",
+             poll_iterations=poll_count, final_status=status)
+
+    if status != "COMPLETED":
+        return respond_with_UI_payload(dict(error="Floor Plan extraction not completed within timeout"), status_code=500)
+
+    walls_2d_all = dict(pages=list())
+    if page_number != '':
+        page_number = int(page_number)
+        rows = await pg_fetch_all(
+            pg_pool,
+            "SELECT page_number, scale, model_2d FROM models WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3 ORDER BY page_number",
+            [project_id, plan_id, page_number],
+            query_name="load_2d_all__by_page"
+        )
+    else:
+        rows = await pg_fetch_all(
+            pg_pool,
+            "SELECT page_number, scale, model_2d FROM models WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) ORDER BY page_number",
+            [project_id, plan_id],
+            query_name="load_2d_all__all_pages"
+        )
+
+    for row in rows:
+        if not row["model_2d"]: continue
+        walls_2d = parse_jsonb(row["model_2d"])
+        if not walls_2d: continue
+        page = {
+            "plan_id": plan_id,
+            "page_number": row["page_number"],
+            "scale": row["scale"],
+            "walls_2d": walls_2d.get("walls_2d", list()),
+            "polygons": walls_2d.get("polygons", list()),
+            **walls_2d.get("metadata", dict()),
+        }
+        walls_2d_all["pages"].append(page)
+
+    log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/load_2d_all",
+             total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2),
+             page_count=len(walls_2d_all["pages"]))
+    return respond_with_UI_payload(walls_2d_all)
+
+
 @app.post("/update_floorplan_to_2d")
 async def update_floorplan_to_2d(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/update_floorplan_to_2d")
+
     pool_err = require_pool(pg_pool, "/update_floorplan_to_2d", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["project_id", "user_id", "plan_id", "page_number"], "/update_floorplan_to_2d", rid)
     if not valid: return err
 
+    walls_2d_JSON = params.get("walls_2d")
+    polygons_JSON = params.get("polygons")
+    scale = params.get("scale")
+    project_id = params["project_id"]
+    user_id = params["user_id"]
+    plan_id = params["plan_id"]
+    index = params["page_number"]
+
     await insert_model_2d(
-        dict(walls_2d=params.get("walls_2d"), polygons=params.get("polygons")),
-        params.get("scale"), params["page_number"], params["plan_id"], params["user_id"],
-        params["project_id"], None, None, pg_pool, CREDENTIALS
+        dict(walls_2d=walls_2d_JSON, polygons=polygons_JSON),
+        scale, index, plan_id, user_id, project_id, None, None, pg_pool, CREDENTIALS
     )
     await insert_model_2d_revision(
-        dict(walls_2d=params.get("walls_2d"), polygons=params.get("polygons")),
-        params.get("scale"), params["page_number"], params["plan_id"], params["user_id"],
-        params["project_id"], pg_pool, CREDENTIALS
+        dict(walls_2d=walls_2d_JSON, polygons=polygons_JSON),
+        scale, index, plan_id, user_id, project_id, pg_pool, CREDENTIALS
     )
-
     log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/update_floorplan_to_2d",
              total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2))
     return respond_with_UI_payload(dict(status="success"))
@@ -803,24 +1005,30 @@ async def update_scale(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/update_scale")
+
     pool_err = require_pool(pg_pool, "/update_scale", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["scale", "project_id", "plan_id", "page_number"], "/update_scale", rid)
     if not valid: return err
 
+    scale = params["scale"]
+    project_id = params["project_id"]
+    plan_id = params["plan_id"]
+    page_number = int(params["page_number"])
+
     await pg_execute(
         pg_pool,
         "UPDATE models SET scale = $1 WHERE LOWER(project_id) = LOWER($2) AND LOWER(plan_id) = LOWER($3) AND page_number = $4",
-        [params["scale"], params["project_id"], params["plan_id"], int(params["page_number"])],
+        [scale, project_id, plan_id, page_number],
         query_name="update_scale"
     )
-
     log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/update_scale",
              total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2))
     return respond_with_UI_payload(dict(status="success"))
@@ -831,28 +1039,32 @@ async def load_scale(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/load_scale")
+
     pool_err = require_pool(pg_pool, "/load_scale", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["project_id", "plan_id", "page_number"], "/load_scale", rid)
     if not valid: return err
 
+    project_id = params["project_id"]
+    plan_id = params["plan_id"]
+    page_number = int(params["page_number"])
+
     row = await pg_fetch_one(
         pg_pool,
         "SELECT scale FROM models WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3",
-        [params["project_id"], params["plan_id"], int(params["page_number"])],
+        [project_id, plan_id, page_number],
         query_name="load_scale"
     )
-    scale = row["scale"] if row else None
-
     log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/load_scale",
              total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2))
-    return respond_with_UI_payload(dict(scale=scale))
+    return respond_with_UI_payload(dict(scale=row["scale"] if row else None))
 
 
 @app.post("/floorplan_to_3d")
@@ -860,53 +1072,58 @@ async def floorplan_to_3d(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/floorplan_to_3d")
+
     pool_err = require_pool(pg_pool, "/floorplan_to_3d", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["project_id", "user_id", "plan_id", "page_number"], "/floorplan_to_3d", rid)
     if not valid: return err
 
+    walls_2d_JSON = params.get("walls_2d")
+    polygons_JSON = params.get("polygons")
     project_id = params["project_id"]
     user_id = params["user_id"]
     plan_id = params["plan_id"]
+    scale = params.get("scale")
     index = params["page_number"]
     index_int = int(index)
 
+    model_2d_path = "/tmp/walls_2d.json"
+    with open(model_2d_path, 'w') as f:
+        json.dump(walls_2d_JSON, f)
+    polygons_path = "/tmp/polygons.json"
+    with open(polygons_path, 'w') as f:
+        json.dump(polygons_JSON, f)
+
+    if not scale:
+        row = await pg_fetch_one(
+            pg_pool,
+            "SELECT scale FROM models WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3",
+            [project_id, plan_id, index_int],
+            query_name="floorplan_to_3d__get_scale"
+        )
+        scale = row["scale"] if row else None
+
+    async with timed_step("extrapolate_3d", request_id=rid):
+        floor_plan_modeller_3d = Extrapolate3D(HYPERPARAMETERS)
+        walls_3d, polygons_3d, walls_3d_path, polygons_3d_path = floor_plan_modeller_3d.extrapolate(scale, model_2d_path=model_2d_path, polygons_path=polygons_path)
+        walls_3d, polygons_3d = floor_plan_modeller_3d.extrapolate_wall_heights_given_polygons(walls_3d, polygons_3d)
+        gltf_paths = floor_plan_modeller_3d.gltf(model_2d_path=model_2d_path, polygons_path=polygons_path)
+        model_3d_path = floor_plan_modeller_3d.save_plot_3d(walls_3d_path, polygons_3d_path)
+
     row = await pg_fetch_one(
         pg_pool,
-        "SELECT scale, model_2d FROM models WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3",
+        "SELECT model_2d->'metadata' AS metadata FROM models WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3",
         [project_id, plan_id, index_int],
-        query_name="floorplan_to_3d__get_model"
+        query_name="floorplan_to_3d__get_metadata"
     )
-    if not row:
-        return respond_with_UI_payload(dict(error="Model not found"), status_code=404)
-
-    scale = row["scale"]
-    model_2d = parse_jsonb(row["model_2d"])
-
-    model_2d_path = f"/tmp/{project_id}/{plan_id}/{user_id}/walls_2d_{str(index).zfill(4)}.json"
-    Path(model_2d_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(model_2d_path, 'w') as f:
-        json.dump([model_2d.get("walls_2d", []), model_2d.get("polygons", [])], f)
-
-    polygons_path = f"/tmp/{project_id}/{plan_id}/{user_id}/polygons_{str(index).zfill(4)}.json"
-    with open(polygons_path, 'w') as f:
-        json.dump(model_2d.get("polygons", []), f)
-
-    floor_plan_modeller_3d = Extrapolate3D(HYPERPARAMETERS)
-    walls_3d, polygons_3d, walls_3d_path, polygons_3d_path = floor_plan_modeller_3d.extrapolate(
-        scale, model_2d_path=model_2d_path, polygons_path=polygons_path
-    )
-    walls_3d, polygons_3d = floor_plan_modeller_3d.extrapolate_wall_heights_given_polygons(walls_3d, polygons_3d)
-    gltf_paths = floor_plan_modeller_3d.gltf(model_2d_path=model_2d_path, polygons_path=polygons_path)
-    model_3d_path = floor_plan_modeller_3d.save_plot_3d(walls_3d_path, polygons_3d_path)
-
-    metadata = parse_jsonb(model_2d.get("metadata")) if model_2d else None
+    metadata = parse_jsonb(row["metadata"]) if row else None
 
     async with timed_step("upload_3d_assets", request_id=rid):
         upload_floorplan(model_3d_path, plan_id, project_id, CREDENTIALS, index=str(index).zfill(4))
@@ -925,27 +1142,29 @@ async def update_floorplan_to_3d(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/update_floorplan_to_3d")
+
     pool_err = require_pool(pg_pool, "/update_floorplan_to_3d", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["project_id", "user_id", "plan_id", "page_number"], "/update_floorplan_to_3d", rid)
     if not valid: return err
 
-    await insert_model_3d(
-        dict(walls_3d=params.get("walls_3d"), polygons=params.get("polygons")),
-        params.get("scale"), params["page_number"], params["plan_id"],
-        params["user_id"], params["project_id"], pg_pool, CREDENTIALS
-    )
-    await insert_model_3d_revision(
-        dict(walls_3d=params.get("walls_3d"), polygons=params.get("polygons")),
-        params.get("scale"), params["page_number"], params["plan_id"],
-        params["user_id"], params["project_id"], pg_pool, CREDENTIALS
-    )
+    walls_3d = params.get("walls_3d")
+    polygons_3d = params.get("polygons")
+    project_id = params["project_id"]
+    user_id = params["user_id"]
+    plan_id = params["plan_id"]
+    scale = params.get("scale")
+    index = params["page_number"]
+
+    await insert_model_3d(dict(walls_3d=walls_3d, polygons=polygons_3d), scale, index, plan_id, user_id, project_id, pg_pool, CREDENTIALS)
+    await insert_model_3d_revision(dict(walls_3d=walls_3d, polygons=polygons_3d), scale, index, plan_id, user_id, project_id, pg_pool, CREDENTIALS)
 
     log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/update_floorplan_to_3d",
              total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2))
@@ -957,21 +1176,26 @@ async def load_3d_all(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/load_3d_all")
+
     pool_err = require_pool(pg_pool, "/load_3d_all", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["project_id", "plan_id"], "/load_3d_all", rid)
     if not valid: return err
 
+    project_id = params["project_id"]
+    plan_id = params["plan_id"]
+
     rows = await pg_fetch_all(
         pg_pool,
         "SELECT page_number, scale, model_3d, model_2d->'metadata' AS metadata FROM models WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2)",
-        [params["project_id"], params["plan_id"]],
+        [project_id, plan_id],
         query_name="load_3d_all"
     )
 
@@ -982,7 +1206,7 @@ async def load_3d_all(request: Request):
         if not model_3d: continue
         metadata = parse_jsonb(row["metadata"]) or {}
         page = dict(
-            plan_id=params["plan_id"],
+            plan_id=plan_id,
             page_number=row["page_number"],
             walls_3d=model_3d.get("walls_3d", []),
             polygons=model_3d.get("polygons", []),
@@ -997,60 +1221,40 @@ async def load_3d_all(request: Request):
     return respond_with_UI_payload(walls_3d_all)
 
 
-@app.post("/load_2d_revision")
-async def load_2d_revision(request: Request):
-    rid = str(uuid.uuid4())[:8]
-    request_start = time_module.perf_counter()
-    log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/load_2d_revision")
-    pool_err = require_pool(pg_pool, "/load_2d_revision", rid)
-    if pool_err: return pool_err
-
-    params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
-
-    valid, err = validate_required(params, ["project_id", "plan_id", "page_number", "revision_number"], "/load_2d_revision", rid)
-    if not valid: return err
-
-    row = await pg_fetch_one(
-        pg_pool,
-        "SELECT model FROM model_revisions_2d WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3 AND revision_number = $4",
-        [params["project_id"], params["plan_id"], int(params["page_number"]), int(params["revision_number"])],
-        query_name="load_2d_revision"
-    )
-
-    log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/load_2d_revision",
-             total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2))
-    return respond_with_UI_payload(parse_jsonb(row["model"]) if row else dict())
-
-
 @app.post("/load_3d_revision")
 async def load_3d_revision(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/load_3d_revision")
+
     pool_err = require_pool(pg_pool, "/load_3d_revision", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["project_id", "plan_id", "page_number", "revision_number"], "/load_3d_revision", rid)
     if not valid: return err
 
+    project_id = params["project_id"]
+    plan_id = params["plan_id"]
+    page_number = int(params["page_number"])
+    revision_number = int(params["revision_number"])
+
     row = await pg_fetch_one(
         pg_pool,
         "SELECT model FROM model_revisions_3d WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3 AND revision_number = $4",
-        [params["project_id"], params["plan_id"], int(params["page_number"]), int(params["revision_number"])],
+        [project_id, plan_id, page_number, revision_number],
         query_name="load_3d_revision"
     )
+    walls_3d_JSON = parse_jsonb(row["model"]) if row else dict()
 
     log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/load_3d_revision",
              total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2))
-    return respond_with_UI_payload(parse_jsonb(row["model"]) if row else dict())
+    return respond_with_UI_payload(walls_3d_JSON)
 
 
 @app.post("/load_available_revision_numbers_3d")
@@ -1058,27 +1262,35 @@ async def load_available_revision_numbers_3d(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/load_available_revision_numbers_3d")
+
     pool_err = require_pool(pg_pool, "/load_available_revision_numbers_3d", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["project_id", "plan_id", "page_number"], "/load_available_revision_numbers_3d", rid)
     if not valid: return err
 
+    project_id = params["project_id"]
+    plan_id = params["plan_id"]
+    page_number = int(params["page_number"])
+
     rows = await pg_fetch_all(
         pg_pool,
         "SELECT revision_number FROM model_revisions_3d WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3",
-        [params["project_id"], params["plan_id"], int(params["page_number"])],
+        [project_id, plan_id, page_number],
         query_name="load_available_revision_numbers_3d"
     )
+    revision_numbers = [row["revision_number"] for row in rows if row["revision_number"] is not None]
 
     log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/load_available_revision_numbers_3d",
-             total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2))
-    return respond_with_UI_payload([row["revision_number"] for row in rows if row["revision_number"] is not None])
+             total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2),
+             revision_count=len(revision_numbers))
+    return respond_with_UI_payload(revision_numbers)
 
 
 @app.post("/generate_drywall_overlaid_floorplan_download_signed_URL")
@@ -1086,53 +1298,61 @@ async def generate_drywall_overlaid_floorplan_download_signed_URL(request: Reque
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/generate_drywall_overlaid_floorplan_download_signed_URL")
+
     pool_err = require_pool(pg_pool, "/generate_drywall_overlaid_floorplan_download_signed_URL", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["project_id", "plan_id", "page_number"], "/generate_drywall_overlaid_floorplan_download_signed_URL", rid)
     if not valid: return err
 
+    index = int(params["page_number"])
     project_id = params["project_id"]
     plan_id = params["plan_id"]
-    index = int(params["page_number"])
 
-    # Poll for completion
-    plan_row = await pg_fetch_one(pg_pool, "SELECT pages FROM plans WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2)",
-                                  [project_id, plan_id], query_name="signed_url__get_pages")
+    plan_row = await pg_fetch_one(
+        pg_pool,
+        "SELECT pages, status FROM plans WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2)",
+        [project_id, plan_id],
+        query_name="gen_drywall_url__get_plan"
+    )
     if not plan_row:
-        return respond_with_UI_payload(dict(error="Floor Plan does not exist"), status_code=404)
+        return respond_with_UI_payload(dict(error="Floor Plan does not exist"))
 
-    n_pages = plan_row["pages"] or 1
+    n_pages = plan_row["pages"]
+    status = plan_row["status"]
     timeout = from_unix_epoch() + (n_pages * 120)
-    status = "IN PROGRESS"
-    while from_unix_epoch() < timeout:
-        row = await pg_fetch_one(pg_pool, "SELECT status FROM plans WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2)",
-                                 [project_id, plan_id], query_name="signed_url__poll_status")
-        if row and row["status"] == "COMPLETED":
-            status = "COMPLETED"
-            break
+    while status != "COMPLETED" and from_unix_epoch() < timeout:
         await asyncio.sleep(2)
+        status_row = await pg_fetch_one(
+            pg_pool,
+            "SELECT status FROM plans WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2)",
+            [project_id, plan_id],
+            query_name="gen_drywall_url__poll_status"
+        )
+        if not status_row:
+            return respond_with_UI_payload(dict(error="Floor Plan does not exist"), status_code=500)
+        status = status_row["status"]
 
     if status != "COMPLETED":
-        return respond_with_UI_payload(dict(error="Floor Plan extraction not completed"), status_code=500)
+        return respond_with_UI_payload(dict(error="Floor Plan extraction not completed within timeout"), status_code=500)
 
     row = await pg_fetch_one(
         pg_pool,
         "SELECT target_drywalls FROM models WHERE LOWER(project_id) = LOWER($1) AND LOWER(plan_id) = LOWER($2) AND page_number = $3",
         [project_id, plan_id, index],
-        query_name="signed_url__get_target_drywalls"
+        query_name="gen_drywall_url__get_target_drywalls"
     )
     if not row or not row["target_drywalls"]:
-        return respond_with_UI_payload(dict(error="Target drywalls not found"), status_code=404)
+        return respond_with_UI_payload(dict(error="Drywall overlay not found for this page"), status_code=404)
 
-    blob_path = row["target_drywalls"]
-    if blob_path.startswith("gs://"):
-        _, _, _, blob_path = blob_path.split('/', 3)
+    drywall_overlaid_floorplan_source_path = row["target_drywalls"]
+    _, _, _, blob_path = drywall_overlaid_floorplan_source_path.split('/', 3)
 
     client = get_gcs_client()
     bucket = client.bucket(CREDENTIALS["CloudStorage"]["bucket_name"])
@@ -1153,18 +1373,24 @@ async def remove_floorplan(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/remove_floorplan")
+
     pool_err = require_pool(pg_pool, "/remove_floorplan", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["project_id", "user_id", "plan_id"], "/remove_floorplan", rid)
     if not valid: return err
 
-    await delete_floorplan(params["project_id"], params["plan_id"], params["user_id"], pg_pool, CREDENTIALS)
+    project_id = params["project_id"]
+    user_id = params["user_id"]
+    plan_id = params["plan_id"]
+
+    await delete_floorplan(project_id, plan_id, user_id, pg_pool, CREDENTIALS)
 
     log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/remove_floorplan",
              total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2))
@@ -1176,13 +1402,15 @@ async def compute_takeoff(request: Request):
     rid = str(uuid.uuid4())[:8]
     request_start = time_module.perf_counter()
     log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/compute_takeoff")
+
     pool_err = require_pool(pg_pool, "/compute_takeoff", rid)
     if pool_err: return pool_err
 
     params = get_params(request.query_params, None)
-    try: body = await request.json()
-    except Exception: body = dict()
-    params = get_params(request.query_params, body)
+    try:
+        body = await request.json()
+        params = get_params(request.query_params, body)
+    except Exception: pass
 
     valid, err = validate_required(params, ["project_id", "plan_id", "user_id", "page_number"], "/compute_takeoff", rid)
     if not valid: return err
@@ -1272,3 +1500,80 @@ async def compute_takeoff(request: Request):
     log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/compute_takeoff",
              total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2))
     return respond_with_UI_payload(takeoff)
+
+
+@app.get("/insert_templates")
+async def insert_templates():
+    rid = str(uuid.uuid4())[:8]
+    request_start = time_module.perf_counter()
+    log_json("INFO", "REQUEST_START", request_id=rid, endpoint="/insert_templates")
+
+    pool_err = require_pool(pg_pool, "/insert_templates", rid)
+    if pool_err: return pool_err
+
+    import pandas as pd
+
+    def parse_fire_rating(description: str):
+        if "TYPE C" in description: return "Type C"
+        if "TYPE X" in description: return "Type X"
+        return None
+
+    def parse_lightweight(description: str): return "LITE" in description.upper()
+    def parse_wide_stretch(description: str): return "WIDE-STRETCH" in description.upper()
+
+    def parse_thickness(description: str):
+        match = re.search(r'(\d+\/\d+)"', description)
+        if match:
+            fraction = match.group(1)
+            numerator, denominator = fraction.split("/")
+            return float(numerator) / float(denominator)
+        return None
+
+    def generate_random_colors(n, seed=0):
+        rng = np.random.default_rng(seed)
+        total_colors = 256**3
+        excluded_index = 255 * 256 * 256 + 0 * 256 + 0
+        indices = rng.choice(total_colors - 1, size=n, replace=False)
+        indices = np.where(indices >= excluded_index, indices + 1, indices)
+        colors = list()
+        for index in indices:
+            r = index // (256 * 256)
+            g = (index // 256) % 256
+            b = index % 256
+            colors.append((int(r), int(g), int(b)))
+        return [dict(r=int(color[0]), g=int(color[1]), b=int(color[2])) for color in colors]
+
+    dataframe = pd.read_excel("Drywall_P_Code_20260122.xlsx")
+    product_color_codes = generate_random_colors(dataframe.size)
+    insert_count = 0
+
+    for (_, row_data), product_color_code in zip(dataframe.iterrows(), product_color_codes):
+        if pd.isna(row_data["user10"]) or pd.isna(row_data["user11"]) or pd.isna(row_data["PRODUCT_CAT_CODE"]) or pd.isna(row_data["PRODUCT_CAT_DESC"]) or not isinstance(row_data["PRODUCT_CAT_CODE"], int):
+            continue
+        sku_description = str(row_data["user11"]).upper()
+        color_code_json = json.dumps(product_color_code)
+
+        await pg_execute(
+            pg_pool,
+            """
+            INSERT INTO sku (
+                sku_id, sku_description, product_cat_code, product_cat_description,
+                thickness_inches, fire_rating, is_lightweight, is_wide_stretch, color_code
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+            ON CONFLICT (sku_id) DO NOTHING
+            """,
+            [
+                str(row_data["user10"]), str(row_data["user11"]),
+                int(row_data["PRODUCT_CAT_CODE"]), str(row_data["PRODUCT_CAT_DESC"]),
+                parse_thickness(sku_description), parse_fire_rating(sku_description),
+                parse_lightweight(sku_description), parse_wide_stretch(sku_description),
+                color_code_json
+            ],
+            query_name="insert_templates"
+        )
+        insert_count += 1
+
+    log_json("INFO", "REQUEST_COMPLETE", request_id=rid, endpoint="/insert_templates",
+             total_duration_ms=round((time_module.perf_counter() - request_start) * 1000, 2),
+             templates_inserted=insert_count)
+    return respond_with_UI_payload(dict(status="success", templates_inserted=insert_count))
