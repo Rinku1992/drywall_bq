@@ -12,6 +12,7 @@ from pathlib import Path
 from collections import defaultdict
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from PIL import JpegImagePlugin 
 
 from fractions import Fraction
 from skimage.morphology import skeletonize
@@ -641,35 +642,62 @@ class FloorPlan2D(FloorPlan):
             X1, Y1, X2, Y2 = wall_line[0]
             open_ends = self.is_open(wall_line, wall_lines)
             if open_ends:
-                orientation = self.classify_line(X1, Y1, X2, Y2)
-                if orientation == "horizontal":
-                    Y = int(np.median([Y1, Y2]))
-                    if 'A' in open_ends:
-                        target_X1 = X1 - np.argmin(canvas[Y - tolerance: Y + tolerance, : X1].mean(axis=0)[::-1])
-                        pixel_value = canvas[Y - tolerance: Y + tolerance, : X1].mean(axis=0)[::-1][np.argmin(canvas[Y - tolerance: Y + tolerance, : X1].mean(axis=0)[::-1])]
-                        if target_X1 > 0 and pixel_value != 255 and abs(X1 - target_X1) <= maximum_length:
-                            wall_lines_closed_dead_end.append([[target_X1, Y, X1, Y]])
-                    if 'B' in open_ends:
-                        target_X2 = X2 + np.argmin(canvas[Y - tolerance: Y + tolerance, X2+1:].mean(axis=0))
-                        pixel_value = canvas[Y - tolerance: Y + tolerance, X2+1:].mean(axis=0)[np.argmin(canvas[Y - tolerance: Y + tolerance, X2+1:].mean(axis=0))]
-                        if target_X2 < 1920 and pixel_value != 255 and abs(target_X2 - X2) <= maximum_length:
-                            wall_lines_closed_dead_end.append([[X2, Y, target_X2, Y]])
-                if orientation == "vertical":
-                    X = int(np.median([X1, X2]))
-                    if 'A' in open_ends:
-                        target_Y1 = Y1 - np.argmin(canvas[: Y1, X - tolerance: X + tolerance].mean(axis=1)[::-1])
-                        pixel_value = canvas[: Y1, X - tolerance: X + tolerance].mean(axis=1)[::-1][np.argmin(canvas[: Y1, X - tolerance: X + tolerance].mean(axis=1)[::-1])]
-                        if target_Y1 > 0  and pixel_value != 255 and abs(Y1 - target_Y1) <= maximum_length:
-                            wall_lines_closed_dead_end.append([[X, target_Y1, X, Y1]])
-                    if 'B' in open_ends:
-                        target_Y2 = Y2 + np.argmin(canvas[Y2+1:, X - tolerance: X + tolerance].mean(axis=1))
-                        pixel_value = canvas[Y2+1:, X - tolerance: X + tolerance].mean(axis=1)[np.argmin(canvas[Y2+1:, X - tolerance: X + tolerance].mean(axis=1))]
-                        if target_Y2 < 1080  and pixel_value != 255 and abs(target_Y2 - Y2) <= maximum_length:
-                            wall_lines_closed_dead_end.append([[X, Y2, X, target_Y2]])
+                try:
+                    orientation = self.classify_line(X1, Y1, X2, Y2)
+                    if orientation == "horizontal":
+                        Y = int(np.median([Y1, Y2]))
+                        if 'A' in open_ends:
+                            _slice = canvas[Y - tolerance: Y + tolerance, : X1]
+                            if _slice.size > 0:
+                                _mean = _slice.mean(axis=0)[::-1]
+                                target_X1 = X1 - np.argmin(_mean)
+                                pixel_value = _mean[np.argmin(_mean)]
+                            else:
+                                target_X1 = 0
+                                pixel_value = 255
+                            if target_X1 > 0 and pixel_value != 255 and abs(X1 - target_X1) <= maximum_length:
+                                wall_lines_closed_dead_end.append([[target_X1, Y, X1, Y]])
+                        if 'B' in open_ends:
+                            _slice = canvas[Y - tolerance: Y + tolerance, X2+1:]
+                            if _slice.size > 0:
+                                _mean = _slice.mean(axis=0)
+                                target_X2 = X2 + np.argmin(_mean)
+                                pixel_value = _mean[np.argmin(_mean)]
+                            else:
+                                target_X2 = 1920
+                                pixel_value = 255
+                            if target_X2 < 1920 and pixel_value != 255 and abs(target_X2 - X2) <= maximum_length:
+                                wall_lines_closed_dead_end.append([[X2, Y, target_X2, Y]])
+                    if orientation == "vertical":
+                        X = int(np.median([X1, X2]))
+                        if 'A' in open_ends:
+                            _slice = canvas[: Y1, X - tolerance: X + tolerance]
+                            if _slice.size > 0:
+                                _mean = _slice.mean(axis=1)[::-1]
+                                target_Y1 = Y1 - np.argmin(_mean)
+                                pixel_value = _mean[np.argmin(_mean)]
+                            else:
+                                target_Y1 = 0
+                                pixel_value = 255
+                            if target_Y1 > 0  and pixel_value != 255 and abs(Y1 - target_Y1) <= maximum_length:
+                                wall_lines_closed_dead_end.append([[X, target_Y1, X, Y1]])
+                        if 'B' in open_ends:
+                            _slice = canvas[Y2+1:, X - tolerance: X + tolerance]
+                            if _slice.size > 0:
+                                _mean = _slice.mean(axis=1)
+                                target_Y2 = Y2 + np.argmin(_mean)
+                                pixel_value = _mean[np.argmin(_mean)]
+                            else:
+                                target_Y2 = 1080
+                                pixel_value = 255
+                            if target_Y2 < 1080  and pixel_value != 255 and abs(target_Y2 - Y2) <= maximum_length:
+                                wall_lines_closed_dead_end.append([[X, Y2, X, target_Y2]])
+                except ValueError:
+                    pass
                 wall_lines_closed_dead_end.append(wall_line)
             else:
                 wall_lines_closed_dead_end.append(wall_line)
-
+ 
         return wall_lines_closed_dead_end
 
     def _topology_guided_extend_and_conquer(self, lines, floor_plan_topology_binary, extension_maximum=10, tolerance=2):
@@ -861,96 +889,99 @@ class FloorPlan2D(FloorPlan):
                 continue
             open_ends = self.is_open(wall_line, wall_lines, tolerance=open_tolerance_threshold)
             if open_ends and 'A' in open_ends and 'B' in open_ends:
-                orientation = self.classify_line(X1, Y1, X2, Y2)
-                if orientation == "horizontal":
-                    is_extended = False
-                    pixel_distance_UP_A = np.argmin(canvas[: Y1, X1 - open_tolerance_threshold: X1 + open_tolerance_threshold].mean(axis=1)[::-1])
-                    pixel_value_UP_A = canvas[: Y1, X1 - open_tolerance_threshold: X1 + open_tolerance_threshold].mean(axis=1)[::-1][np.argmin(canvas[: Y1, X1 - open_tolerance_threshold: X1 + open_tolerance_threshold].mean(axis=1)[::-1])]
-                    pixel_distance_UP_A = pixel_distance_UP_A if pixel_value_UP_A != 255 else np.inf
-                    pixel_distance_DOWN_A = np.argmin(canvas[Y1 + 1:, X1 - open_tolerance_threshold: X1 + open_tolerance_threshold].mean(axis=1))
-                    pixel_value_DOWN_A = canvas[Y1 + 1:, X1 - open_tolerance_threshold: X1 + open_tolerance_threshold].mean(axis=1)[np.argmin(canvas[Y1 + 1:, X1 - open_tolerance_threshold: X1 + open_tolerance_threshold].mean(axis=1))]
-                    pixel_distance_DOWN_A = pixel_distance_DOWN_A if pixel_value_DOWN_A != 255 else np.inf
-                    pixel_distance_LEFT_A = np.argmin(canvas[round(np.median([Y1, Y2])) - open_tolerance_threshold: round(np.median([Y1, Y2])) + open_tolerance_threshold, : X1].mean(axis=0)[::-1])
-                    pixel_value_LEFT_A = canvas[round(np.median([Y1, Y2])) - open_tolerance_threshold: round(np.median([Y1, Y2])) + open_tolerance_threshold, : X1].mean(axis=0)[::-1][np.argmin(canvas[round(np.median([Y1, Y2])) - open_tolerance_threshold: round(np.median([Y1, Y2])) + open_tolerance_threshold, : X1].mean(axis=0)[::-1])]
-                    pixel_distance_LEFT_A = pixel_distance_LEFT_A if pixel_value_LEFT_A != 255 else np.inf
-                    if min(pixel_distance_UP_A, pixel_distance_DOWN_A, pixel_distance_LEFT_A) <= 500:
-                        if np.argmin([pixel_distance_UP_A, pixel_distance_DOWN_A, pixel_distance_LEFT_A]) == 0 and pixel_value_UP_A != 255:
-                            valid_wall_lines.append([[X1, Y1 - pixel_distance_UP_A, X1, Y1]])
-                            is_extended = True
-                        if np.argmin([pixel_distance_UP_A, pixel_distance_DOWN_A, pixel_distance_LEFT_A]) == 1 and pixel_value_DOWN_A != 255:
-                            valid_wall_lines.append([[X1, Y1, X1, Y1 + pixel_distance_DOWN_A]])
-                            is_extended = True
-                        if np.argmin([pixel_distance_UP_A, pixel_distance_DOWN_A, pixel_distance_LEFT_A]) == 2 and pixel_value_LEFT_A != 255:
-                            valid_wall_lines.append([[X1 - pixel_distance_LEFT_A, Y1, X1, Y1]])
-                            is_extended = True
-                    pixel_distance_UP_B = np.argmin(canvas[: Y2, X2 - open_tolerance_threshold: X2 + open_tolerance_threshold].mean(axis=1)[::-1])
-                    pixel_value_UP_B = canvas[: Y2, X2 - open_tolerance_threshold: X2 + open_tolerance_threshold].mean(axis=1)[::-1][np.argmin(canvas[: Y2, X2 - open_tolerance_threshold: X2 + open_tolerance_threshold].mean(axis=1)[::-1])]
-                    pixel_distance_UP_B = pixel_distance_UP_B if pixel_value_UP_B != 255 else np.inf
-                    pixel_distance_DOWN_B = np.argmin(canvas[Y2 + 1:, X2 - open_tolerance_threshold: X2 + open_tolerance_threshold].mean(axis=1))
-                    pixel_value_DOWN_B = canvas[Y2 + 1:, X2 - open_tolerance_threshold: X2 + open_tolerance_threshold].mean(axis=1)[np.argmin(canvas[Y2 + 1:, X2 - open_tolerance_threshold: X2 + open_tolerance_threshold].mean(axis=1))]
-                    pixel_distance_DOWN_B = pixel_distance_DOWN_B if pixel_value_DOWN_B != 255 else np.inf
-                    pixel_distance_RIGHT_B = np.argmin(canvas[round(np.median([Y1, Y2])) - open_tolerance_threshold: round(np.median([Y1, Y2])) + open_tolerance_threshold, X2 + 1:].mean(axis=0)[::-1])
-                    pixel_value_RIGHT_B = canvas[round(np.median([Y1, Y2])) - open_tolerance_threshold: round(np.median([Y1, Y2])) + open_tolerance_threshold, X2 + 1:].mean(axis=0)[::-1][np.argmin(canvas[round(np.median([Y1, Y2])) - open_tolerance_threshold: round(np.median([Y1, Y2])) + open_tolerance_threshold, X2 + 1:].mean(axis=0)[::-1])]
-                    pixel_distance_RIGHT_B = pixel_distance_RIGHT_B if pixel_value_RIGHT_B != 255 else np.inf
-                    if min(pixel_distance_UP_B, pixel_distance_DOWN_B, pixel_distance_RIGHT_B) <= 500:
-                        if np.argmin([pixel_distance_UP_B, pixel_distance_DOWN_B, pixel_distance_RIGHT_B]) == 0 and pixel_value_UP_B != 255:
-                            valid_wall_lines.append([[X2, Y2 - pixel_distance_UP_B, X2, Y2]])
-                            is_extended = True
-                        if np.argmin([pixel_distance_UP_B, pixel_distance_DOWN_B, pixel_distance_RIGHT_B]) == 1 and pixel_value_DOWN_B != 255:
-                            valid_wall_lines.append([[X2, Y2, X2, Y2 + pixel_distance_DOWN_B]])
-                            is_extended = True
-                        if np.argmin([pixel_distance_UP_B, pixel_distance_DOWN_B, pixel_distance_RIGHT_B]) == 2 and pixel_value_RIGHT_B != 255:
-                            valid_wall_lines.append([[X2, Y2, X2 + pixel_distance_RIGHT_B, Y2]])
-                            is_extended = True
-                    if is_extended:
-                        valid_wall_lines.append(wall_line)
-                if orientation == "vertical":
-                    is_extended = False
-                    pixel_distance_LEFT_A = np.argmin(canvas[Y1 - open_tolerance_threshold: Y1 + open_tolerance_threshold, :X1].mean(axis=0)[::-1])
-                    pixel_value_LEFT_A = canvas[Y1 - open_tolerance_threshold: Y1 + open_tolerance_threshold, :X1].mean(axis=0)[::-1][np.argmin(canvas[Y1 - open_tolerance_threshold: Y1 + open_tolerance_threshold, :X1].mean(axis=0)[::-1])]
-                    pixel_distance_LEFT_A = pixel_distance_LEFT_A if pixel_value_LEFT_A != 255 else np.inf
-                    pixel_distance_RIGHT_A = np.argmin(canvas[Y1 - open_tolerance_threshold:Y1 + open_tolerance_threshold, X1 + 1:].mean(axis=0))
-                    pixel_value_RIGHT_A = canvas[Y1 - open_tolerance_threshold:Y1 + open_tolerance_threshold, X1 + 1:].mean(axis=0)[np.argmin(canvas[Y1 - open_tolerance_threshold:Y1 + open_tolerance_threshold, X1 + 1:].mean(axis=0))]
-                    pixel_distance_RIGHT_A = pixel_distance_RIGHT_A if pixel_value_RIGHT_A != 255 else np.inf
-                    pixel_distance_UP_A = np.argmin(canvas[:Y1, X1 - open_tolerance_threshold:X1 + open_tolerance_threshold].mean(axis=1)[::-1])
-                    pixel_value_UP_A = canvas[:Y1, X1 - open_tolerance_threshold:X1 + open_tolerance_threshold].mean(axis=1)[::-1][np.argmin(canvas[:Y1, X1 - open_tolerance_threshold:X1 + open_tolerance_threshold].mean(axis=1)[::-1])]
-                    pixel_distance_UP_A = pixel_distance_UP_A if pixel_value_UP_A != 255 else np.inf
-                    if min(pixel_distance_LEFT_A, pixel_distance_RIGHT_A, pixel_distance_UP_A) <= 500:
-                        if np.argmin([pixel_distance_LEFT_A, pixel_distance_RIGHT_A, pixel_distance_UP_A]) == 0 and pixel_value_LEFT_A != 255:
-                            valid_wall_lines.append([[X1 - pixel_distance_LEFT_A, Y1, X1, Y1]])
-                            is_extended = True
-                        if np.argmin([pixel_distance_LEFT_A, pixel_distance_RIGHT_A, pixel_distance_UP_A]) == 1 and pixel_value_RIGHT_A != 255:
-                            valid_wall_lines.append([[X1, Y1, X1 + pixel_distance_RIGHT_A, Y1]])
-                            is_extended = True
-                        if np.argmin([pixel_distance_LEFT_A, pixel_distance_RIGHT_A, pixel_distance_UP_A]) == 2 and pixel_value_UP_A != 255:
-                            valid_wall_lines.append([[X1, Y1 - pixel_distance_UP_A, X1, Y1]])
-                            is_extended = True
-                    pixel_distance_LEFT_B = np.argmin(canvas[Y2 - open_tolerance_threshold:Y2 + open_tolerance_threshold, :X2].mean(axis=0)[::-1])
-                    pixel_value_LEFT_B = canvas[Y2 - open_tolerance_threshold:Y2 + open_tolerance_threshold, :X2].mean(axis=0)[::-1][np.argmin(canvas[Y2 - open_tolerance_threshold:Y2 + open_tolerance_threshold, :X2].mean(axis=0)[::-1])]
-                    pixel_distance_LEFT_B = pixel_distance_LEFT_B if pixel_value_LEFT_B != 255 else np.inf
-                    pixel_distance_RIGHT_B = np.argmin(canvas[Y2 - open_tolerance_threshold:Y2 + open_tolerance_threshold, X2 + 1:].mean(axis=0))
-                    pixel_value_RIGHT_B = canvas[Y2 - open_tolerance_threshold:Y2 + open_tolerance_threshold, X2 + 1:].mean(axis=0)[np.argmin(canvas[Y2 - open_tolerance_threshold:Y2 + open_tolerance_threshold, X2 + 1:].mean(axis=0))]
-                    pixel_distance_RIGHT_B = pixel_distance_RIGHT_B if pixel_value_RIGHT_B != 255 else np.inf
-                    pixel_distance_DOWN_B = np.argmin(canvas[Y2 + 1:, X2 - open_tolerance_threshold:X2 + open_tolerance_threshold].mean(axis=1))
-                    pixel_value_DOWN_B = canvas[Y2 + 1:, X2 - open_tolerance_threshold:X2 + open_tolerance_threshold].mean(axis=1)[np.argmin(canvas[Y2 + 1:, X2 - open_tolerance_threshold:X2 + open_tolerance_threshold].mean(axis=1))]
-                    pixel_distance_DOWN_B = pixel_distance_DOWN_B if pixel_value_DOWN_B != 255 else np.inf
-                    if min(pixel_distance_LEFT_B, pixel_distance_RIGHT_B, pixel_distance_DOWN_B) <= 500:
-                        if np.argmin([pixel_distance_LEFT_B, pixel_distance_RIGHT_B, pixel_distance_DOWN_B]) == 0 and pixel_value_LEFT_B != 255:
-                            valid_wall_lines.append([[X2 - pixel_distance_LEFT_B, Y2, X2, Y2]])
-                            is_extended = True
-                        if np.argmin([pixel_distance_LEFT_B, pixel_distance_RIGHT_B, pixel_distance_DOWN_B]) == 1 and pixel_value_RIGHT_B != 255:
-                            valid_wall_lines.append([[X2, Y2, X2 + pixel_distance_RIGHT_B, Y2]])
-                            is_extended = True
-                        if np.argmin([pixel_distance_LEFT_B, pixel_distance_RIGHT_B, pixel_distance_DOWN_B]) == 2 and pixel_value_DOWN_B != 255:
-                            valid_wall_lines.append([[X2, Y2, X2, Y2 + pixel_distance_DOWN_B]])
-                            is_extended = True
-                    if is_extended:
-                        valid_wall_lines.append(wall_line)
-
+                try:
+                    orientation = self.classify_line(X1, Y1, X2, Y2)
+                    if orientation == "horizontal":
+                        is_extended = False
+                        pixel_distance_UP_A = np.argmin(canvas[: Y1, X1 - open_tolerance_threshold: X1 + open_tolerance_threshold].mean(axis=1)[::-1])
+                        pixel_value_UP_A = canvas[: Y1, X1 - open_tolerance_threshold: X1 + open_tolerance_threshold].mean(axis=1)[::-1][np.argmin(canvas[: Y1, X1 - open_tolerance_threshold: X1 + open_tolerance_threshold].mean(axis=1)[::-1])]
+                        pixel_distance_UP_A = pixel_distance_UP_A if pixel_value_UP_A != 255 else np.inf
+                        pixel_distance_DOWN_A = np.argmin(canvas[Y1 + 1:, X1 - open_tolerance_threshold: X1 + open_tolerance_threshold].mean(axis=1))
+                        pixel_value_DOWN_A = canvas[Y1 + 1:, X1 - open_tolerance_threshold: X1 + open_tolerance_threshold].mean(axis=1)[np.argmin(canvas[Y1 + 1:, X1 - open_tolerance_threshold: X1 + open_tolerance_threshold].mean(axis=1))]
+                        pixel_distance_DOWN_A = pixel_distance_DOWN_A if pixel_value_DOWN_A != 255 else np.inf
+                        pixel_distance_LEFT_A = np.argmin(canvas[round(np.median([Y1, Y2])) - open_tolerance_threshold: round(np.median([Y1, Y2])) + open_tolerance_threshold, : X1].mean(axis=0)[::-1])
+                        pixel_value_LEFT_A = canvas[round(np.median([Y1, Y2])) - open_tolerance_threshold: round(np.median([Y1, Y2])) + open_tolerance_threshold, : X1].mean(axis=0)[::-1][np.argmin(canvas[round(np.median([Y1, Y2])) - open_tolerance_threshold: round(np.median([Y1, Y2])) + open_tolerance_threshold, : X1].mean(axis=0)[::-1])]
+                        pixel_distance_LEFT_A = pixel_distance_LEFT_A if pixel_value_LEFT_A != 255 else np.inf
+                        if min(pixel_distance_UP_A, pixel_distance_DOWN_A, pixel_distance_LEFT_A) <= 500:
+                            if np.argmin([pixel_distance_UP_A, pixel_distance_DOWN_A, pixel_distance_LEFT_A]) == 0 and pixel_value_UP_A != 255:
+                                valid_wall_lines.append([[X1, Y1 - pixel_distance_UP_A, X1, Y1]])
+                                is_extended = True
+                            if np.argmin([pixel_distance_UP_A, pixel_distance_DOWN_A, pixel_distance_LEFT_A]) == 1 and pixel_value_DOWN_A != 255:
+                                valid_wall_lines.append([[X1, Y1, X1, Y1 + pixel_distance_DOWN_A]])
+                                is_extended = True
+                            if np.argmin([pixel_distance_UP_A, pixel_distance_DOWN_A, pixel_distance_LEFT_A]) == 2 and pixel_value_LEFT_A != 255:
+                                valid_wall_lines.append([[X1 - pixel_distance_LEFT_A, Y1, X1, Y1]])
+                                is_extended = True
+                        pixel_distance_UP_B = np.argmin(canvas[: Y2, X2 - open_tolerance_threshold: X2 + open_tolerance_threshold].mean(axis=1)[::-1])
+                        pixel_value_UP_B = canvas[: Y2, X2 - open_tolerance_threshold: X2 + open_tolerance_threshold].mean(axis=1)[::-1][np.argmin(canvas[: Y2, X2 - open_tolerance_threshold: X2 + open_tolerance_threshold].mean(axis=1)[::-1])]
+                        pixel_distance_UP_B = pixel_distance_UP_B if pixel_value_UP_B != 255 else np.inf
+                        pixel_distance_DOWN_B = np.argmin(canvas[Y2 + 1:, X2 - open_tolerance_threshold: X2 + open_tolerance_threshold].mean(axis=1))
+                        pixel_value_DOWN_B = canvas[Y2 + 1:, X2 - open_tolerance_threshold: X2 + open_tolerance_threshold].mean(axis=1)[np.argmin(canvas[Y2 + 1:, X2 - open_tolerance_threshold: X2 + open_tolerance_threshold].mean(axis=1))]
+                        pixel_distance_DOWN_B = pixel_distance_DOWN_B if pixel_value_DOWN_B != 255 else np.inf
+                        pixel_distance_RIGHT_B = np.argmin(canvas[round(np.median([Y1, Y2])) - open_tolerance_threshold: round(np.median([Y1, Y2])) + open_tolerance_threshold, X2 + 1:].mean(axis=0)[::-1])
+                        pixel_value_RIGHT_B = canvas[round(np.median([Y1, Y2])) - open_tolerance_threshold: round(np.median([Y1, Y2])) + open_tolerance_threshold, X2 + 1:].mean(axis=0)[::-1][np.argmin(canvas[round(np.median([Y1, Y2])) - open_tolerance_threshold: round(np.median([Y1, Y2])) + open_tolerance_threshold, X2 + 1:].mean(axis=0)[::-1])]
+                        pixel_distance_RIGHT_B = pixel_distance_RIGHT_B if pixel_value_RIGHT_B != 255 else np.inf
+                        if min(pixel_distance_UP_B, pixel_distance_DOWN_B, pixel_distance_RIGHT_B) <= 500:
+                            if np.argmin([pixel_distance_UP_B, pixel_distance_DOWN_B, pixel_distance_RIGHT_B]) == 0 and pixel_value_UP_B != 255:
+                                valid_wall_lines.append([[X2, Y2 - pixel_distance_UP_B, X2, Y2]])
+                                is_extended = True
+                            if np.argmin([pixel_distance_UP_B, pixel_distance_DOWN_B, pixel_distance_RIGHT_B]) == 1 and pixel_value_DOWN_B != 255:
+                                valid_wall_lines.append([[X2, Y2, X2, Y2 + pixel_distance_DOWN_B]])
+                                is_extended = True
+                            if np.argmin([pixel_distance_UP_B, pixel_distance_DOWN_B, pixel_distance_RIGHT_B]) == 2 and pixel_value_RIGHT_B != 255:
+                                valid_wall_lines.append([[X2, Y2, X2 + pixel_distance_RIGHT_B, Y2]])
+                                is_extended = True
+                        if is_extended:
+                            valid_wall_lines.append(wall_line)
+                    if orientation == "vertical":
+                        is_extended = False
+                        pixel_distance_LEFT_A = np.argmin(canvas[Y1 - open_tolerance_threshold: Y1 + open_tolerance_threshold, :X1].mean(axis=0)[::-1])
+                        pixel_value_LEFT_A = canvas[Y1 - open_tolerance_threshold: Y1 + open_tolerance_threshold, :X1].mean(axis=0)[::-1][np.argmin(canvas[Y1 - open_tolerance_threshold: Y1 + open_tolerance_threshold, :X1].mean(axis=0)[::-1])]
+                        pixel_distance_LEFT_A = pixel_distance_LEFT_A if pixel_value_LEFT_A != 255 else np.inf
+                        pixel_distance_RIGHT_A = np.argmin(canvas[Y1 - open_tolerance_threshold:Y1 + open_tolerance_threshold, X1 + 1:].mean(axis=0))
+                        pixel_value_RIGHT_A = canvas[Y1 - open_tolerance_threshold:Y1 + open_tolerance_threshold, X1 + 1:].mean(axis=0)[np.argmin(canvas[Y1 - open_tolerance_threshold:Y1 + open_tolerance_threshold, X1 + 1:].mean(axis=0))]
+                        pixel_distance_RIGHT_A = pixel_distance_RIGHT_A if pixel_value_RIGHT_A != 255 else np.inf
+                        pixel_distance_UP_A = np.argmin(canvas[:Y1, X1 - open_tolerance_threshold:X1 + open_tolerance_threshold].mean(axis=1)[::-1])
+                        pixel_value_UP_A = canvas[:Y1, X1 - open_tolerance_threshold:X1 + open_tolerance_threshold].mean(axis=1)[::-1][np.argmin(canvas[:Y1, X1 - open_tolerance_threshold:X1 + open_tolerance_threshold].mean(axis=1)[::-1])]
+                        pixel_distance_UP_A = pixel_distance_UP_A if pixel_value_UP_A != 255 else np.inf
+                        if min(pixel_distance_LEFT_A, pixel_distance_RIGHT_A, pixel_distance_UP_A) <= 500:
+                            if np.argmin([pixel_distance_LEFT_A, pixel_distance_RIGHT_A, pixel_distance_UP_A]) == 0 and pixel_value_LEFT_A != 255:
+                                valid_wall_lines.append([[X1 - pixel_distance_LEFT_A, Y1, X1, Y1]])
+                                is_extended = True
+                            if np.argmin([pixel_distance_LEFT_A, pixel_distance_RIGHT_A, pixel_distance_UP_A]) == 1 and pixel_value_RIGHT_A != 255:
+                                valid_wall_lines.append([[X1, Y1, X1 + pixel_distance_RIGHT_A, Y1]])
+                                is_extended = True
+                            if np.argmin([pixel_distance_LEFT_A, pixel_distance_RIGHT_A, pixel_distance_UP_A]) == 2 and pixel_value_UP_A != 255:
+                                valid_wall_lines.append([[X1, Y1 - pixel_distance_UP_A, X1, Y1]])
+                                is_extended = True
+                        pixel_distance_LEFT_B = np.argmin(canvas[Y2 - open_tolerance_threshold:Y2 + open_tolerance_threshold, :X2].mean(axis=0)[::-1])
+                        pixel_value_LEFT_B = canvas[Y2 - open_tolerance_threshold:Y2 + open_tolerance_threshold, :X2].mean(axis=0)[::-1][np.argmin(canvas[Y2 - open_tolerance_threshold:Y2 + open_tolerance_threshold, :X2].mean(axis=0)[::-1])]
+                        pixel_distance_LEFT_B = pixel_distance_LEFT_B if pixel_value_LEFT_B != 255 else np.inf
+                        pixel_distance_RIGHT_B = np.argmin(canvas[Y2 - open_tolerance_threshold:Y2 + open_tolerance_threshold, X2 + 1:].mean(axis=0))
+                        pixel_value_RIGHT_B = canvas[Y2 - open_tolerance_threshold:Y2 + open_tolerance_threshold, X2 + 1:].mean(axis=0)[np.argmin(canvas[Y2 - open_tolerance_threshold:Y2 + open_tolerance_threshold, X2 + 1:].mean(axis=0))]
+                        pixel_distance_RIGHT_B = pixel_distance_RIGHT_B if pixel_value_RIGHT_B != 255 else np.inf
+                        pixel_distance_DOWN_B = np.argmin(canvas[Y2 + 1:, X2 - open_tolerance_threshold:X2 + open_tolerance_threshold].mean(axis=1))
+                        pixel_value_DOWN_B = canvas[Y2 + 1:, X2 - open_tolerance_threshold:X2 + open_tolerance_threshold].mean(axis=1)[np.argmin(canvas[Y2 + 1:, X2 - open_tolerance_threshold:X2 + open_tolerance_threshold].mean(axis=1))]
+                        pixel_distance_DOWN_B = pixel_distance_DOWN_B if pixel_value_DOWN_B != 255 else np.inf
+                        if min(pixel_distance_LEFT_B, pixel_distance_RIGHT_B, pixel_distance_DOWN_B) <= 500:
+                            if np.argmin([pixel_distance_LEFT_B, pixel_distance_RIGHT_B, pixel_distance_DOWN_B]) == 0 and pixel_value_LEFT_B != 255:
+                                valid_wall_lines.append([[X2 - pixel_distance_LEFT_B, Y2, X2, Y2]])
+                                is_extended = True
+                            if np.argmin([pixel_distance_LEFT_B, pixel_distance_RIGHT_B, pixel_distance_DOWN_B]) == 1 and pixel_value_RIGHT_B != 255:
+                                valid_wall_lines.append([[X2, Y2, X2 + pixel_distance_RIGHT_B, Y2]])
+                                is_extended = True
+                            if np.argmin([pixel_distance_LEFT_B, pixel_distance_RIGHT_B, pixel_distance_DOWN_B]) == 2 and pixel_value_DOWN_B != 255:
+                                valid_wall_lines.append([[X2, Y2, X2, Y2 + pixel_distance_DOWN_B]])
+                                is_extended = True
+                        if is_extended:
+                            valid_wall_lines.append(wall_line)
+                except ValueError:
+                    valid_wall_lines.append(wall_line)
                 continue
             valid_wall_lines.append(wall_line)
-
+ 
         return valid_wall_lines
+ 
 
     def _deduplicate_lines(self, wall_lines, tolerance=10):
         if wall_lines is None:
@@ -1260,7 +1291,8 @@ class FloorPlan2D(FloorPlan):
                     ),
                     max_retry=self._credentials["VertexAI"]["llm"]["max_retry"],
                     pydantic_model=DrywallPredictorCaliforniaResponse,
-                    verify_field_counts=dict(wall_parameters=len(perimeter_lines)),
+                    # verify_field_counts=dict(wall_parameters=len(perimeter_lines)),
+                    verify_field_counts=dict(wall_parameters=len(walls)),
                 )
             else:
                 _, model_polygon = phoenix_call(
@@ -1270,7 +1302,8 @@ class FloorPlan2D(FloorPlan):
                     ),
                     max_retry=self._credentials["VertexAI"]["llm"]["max_retry"],
                     pydantic_model=DrywallPredictorCaliforniaResponse,
-                    verify_field_counts=dict(wall_parameters=len(perimeter_lines)),
+                    # verify_field_counts=dict(wall_parameters=len(perimeter_lines)),
+                    verify_field_counts=dict(wall_parameters=len(walls)),
                 )
             model_polygon["ceiling"]["area"] = verify_tolerance_area(model_polygon["ceiling"]["area"], area_target, model_polygon["ceiling"]["confidence_area"])
             model_polygon["ceiling"]["height"] = verify_tolerance_height(model_polygon["ceiling"]["height"], model_polygon["ceiling"]["confidence_height"])
